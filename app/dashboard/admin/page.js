@@ -1,0 +1,408 @@
+"use client";
+
+import { useState } from "react";
+import { useUser } from "../layout";
+import { BRANDS, ROLES } from "@/lib/data";
+import { DEMO_USERS } from "@/lib/auth";
+
+function UserRow({ user, onEdit, onDelete }) {
+  const brandColors = {
+    carstar: "#E31837",
+    take5: "#0066CC",
+    autoglass: "#00875A",
+  };
+
+  const roleColors = {
+    admin: { bg: "#a78bfa20", color: "#a78bfa" },
+    manager: { bg: "#93c5fd20", color: "#93c5fd" },
+    editor: { bg: "#fbbf2420", color: "#fbbf24" },
+    viewer: { bg: "#88888820", color: "#888888" },
+  };
+
+  const rc = roleColors[user.role] || roleColors.viewer;
+
+  return (
+    <div className="flex items-center gap-4 px-5 py-3.5 transition-colors hover:bg-[#1a1a1d]" style={{ borderBottom: "1px solid #1a1a1d" }}>
+      <div className="w-9 h-9 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>
+        {user.initials}
+      </div>
+
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold text-white">{user.name}</div>
+        <div className="text-xs font-mono" style={{ color: "#666" }}>{user.email}</div>
+      </div>
+
+      <span className="hidden sm:inline-flex px-2.5 py-0.5 rounded text-[11px] font-semibold capitalize" style={{ background: rc.bg, color: rc.color }}>
+        {user.role}
+      </span>
+
+      <div className="hidden md:flex items-center gap-1">
+        {user.brands.map((b) => (
+          <span key={b} className="w-2.5 h-2.5 rounded-sm" style={{ background: brandColors[b] }} title={BRANDS.find((br) => br.id === b)?.name} />
+        ))}
+      </div>
+
+      <div className="text-[11px] hidden lg:block" style={{ color: "#555" }}>
+        Added {user.createdAt}
+      </div>
+
+      <div className="flex gap-1.5">
+        <button onClick={() => onEdit(user)} className="px-2.5 py-1 rounded text-[11px] font-semibold" style={{ background: "#222", border: "1px solid #2a2a2e", color: "#888" }}>
+          Edit
+        </button>
+        {user.role !== "admin" && (
+          <button onClick={() => onDelete(user)} className="px-2.5 py-1 rounded text-[11px] font-semibold" style={{ background: "#2d0a0a", border: "1px solid #5c1a1a", color: "#f87171" }}>
+            Remove
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function UserModal({ user, onClose, onSave }) {
+  const isNew = !user;
+  const [form, setForm] = useState(
+    user || {
+      name: "",
+      email: "",
+      password: "",
+      role: "editor",
+      initials: "",
+      brands: [],
+    }
+  );
+  const [saving, setSaving] = useState(false);
+
+  const toggleBrand = (brandId) => {
+    setForm((prev) => ({
+      ...prev,
+      brands: prev.brands.includes(brandId)
+        ? prev.brands.filter((b) => b !== brandId)
+        : [...prev.brands, brandId],
+    }));
+  };
+
+  const handleNameChange = (name) => {
+    const parts = name.trim().split(" ");
+    const initials = parts.length >= 2
+      ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+      : name.slice(0, 2).toUpperCase();
+    setForm({ ...form, name, initials });
+  };
+
+  const handleSave = () => {
+    setSaving(true);
+    setTimeout(() => {
+      onSave(form);
+    }, 800);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}>
+      <div className="animate-fade-scale w-full max-w-md flex flex-col rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #2a2a2e" }}>
+        <div className="px-6 py-5 flex justify-between items-start" style={{ borderBottom: "1px solid #2a2a2e" }}>
+          <div>
+            <span className="text-[11px] font-semibold uppercase tracking-wider block mb-1" style={{ color: "#888" }}>
+              {isNew ? "Add User" : "Edit User"}
+            </span>
+            <h3 className="text-base font-semibold text-white">
+              {isNew ? "New Team Member" : form.name}
+            </h3>
+          </div>
+          <button onClick={onClose} className="w-7 h-7 rounded-md flex items-center justify-center text-sm" style={{ background: "#222", border: "1px solid #333", color: "#888" }}>
+            ×
+          </button>
+        </div>
+
+        <div className="px-6 py-5 space-y-4 overflow-y-auto">
+          {/* Name */}
+          <div>
+            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+              Full Name
+            </label>
+            <input
+              value={form.name}
+              onChange={(e) => handleNameChange(e.target.value)}
+              placeholder="Jane Smith"
+              className="w-full px-3 py-2.5 rounded-md text-sm"
+              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+            />
+          </div>
+
+          {/* Email */}
+          <div>
+            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+              Email
+            </label>
+            <input
+              type="email"
+              value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+              placeholder="jane@drivenbrands.com"
+              className="w-full px-3 py-2.5 rounded-md text-sm"
+              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+            />
+          </div>
+
+          {/* Password (new user only) */}
+          {isNew && (
+            <div>
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                Temporary Password
+              </label>
+              <input
+                type="text"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+                placeholder="Set initial password"
+                className="w-full px-3 py-2.5 rounded-md text-sm"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+              />
+              <p className="text-[11px] mt-1" style={{ color: "#555" }}>
+                User can change this after first login (in production)
+              </p>
+            </div>
+          )}
+
+          {/* Role */}
+          <div>
+            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>
+              Role
+            </label>
+            <div className="space-y-1.5">
+              {ROLES.map((role) => (
+                <label key={role.id} className="flex gap-3 px-3 py-2.5 rounded-md cursor-pointer transition-colors" style={{ background: form.role === role.id ? "#1c1c1f" : "transparent", border: `1px solid ${form.role === role.id ? "#2a2a2e" : "transparent"}` }}>
+                  <input
+                    type="radio"
+                    name="role"
+                    checked={form.role === role.id}
+                    onChange={() => setForm({ ...form, role: role.id })}
+                    style={{ accentColor: "#a78bfa", marginTop: "1px" }}
+                  />
+                  <div>
+                    <div className="text-xs font-semibold text-white">{role.label}</div>
+                    <div className="text-[11px]" style={{ color: "#666" }}>{role.description}</div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Brand access */}
+          <div>
+            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>
+              Brand Access
+            </label>
+            <div className="flex gap-2 flex-wrap">
+              {BRANDS.map((b) => {
+                const active = form.brands.includes(b.id);
+                return (
+                  <button
+                    key={b.id}
+                    type="button"
+                    onClick={() => toggleBrand(b.id)}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors"
+                    style={{
+                      background: active ? b.color + "18" : "#1c1c1f",
+                      border: `1.5px solid ${active ? b.color : "#2a2a2e"}`,
+                      color: active ? b.color : "#888",
+                    }}
+                  >
+                    <span className="w-2 h-2 rounded-sm" style={{ background: b.color }} />
+                    {b.name}
+                  </button>
+                );
+              })}
+            </div>
+            {form.brands.length === 0 && (
+              <p className="text-[11px] mt-1.5" style={{ color: "#f87171" }}>
+                Select at least one brand
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="px-6 py-4 flex justify-end gap-2" style={{ borderTop: "1px solid #2a2a2e" }}>
+          <button onClick={onClose} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || !form.name || !form.email || form.brands.length === 0}
+            className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
+            style={{ background: "#a78bfa", opacity: saving || !form.name || !form.email || form.brands.length === 0 ? 0.5 : 1 }}
+          >
+            {saving ? "Saving..." : isNew ? "Add User" : "Save Changes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteModal({ user, onClose, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}>
+      <div className="animate-fade-scale w-full max-w-sm rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #2a2a2e" }}>
+        <div className="px-6 py-5">
+          <h3 className="text-base font-semibold text-white mb-2">Remove User</h3>
+          <p className="text-sm" style={{ color: "#999" }}>
+            Are you sure you want to remove <strong className="text-white">{user.name}</strong> ({user.email})? They will immediately lose access to the Listing Manager.
+          </p>
+        </div>
+        <div className="px-6 py-4 flex justify-end gap-2" style={{ borderTop: "1px solid #2a2a2e" }}>
+          <button onClick={onClose} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>
+            Cancel
+          </button>
+          <button onClick={() => onConfirm(user)} className="px-5 py-2 rounded-md text-xs font-semibold text-white" style={{ background: "#dc2626" }}>
+            Remove User
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function AdminPage() {
+  const currentUser = useUser();
+  const [users, setUsers] = useState(DEMO_USERS.map(({ password, ...u }) => u));
+  const [editingUser, setEditingUser] = useState(undefined); // undefined=closed, null=new, object=edit
+  const [deletingUser, setDeletingUser] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  if (currentUser?.role !== "admin") {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-center">
+          <div className="text-3xl mb-3">🔒</div>
+          <h2 className="text-base font-bold text-white mb-1">Access Restricted</h2>
+          <p className="text-sm" style={{ color: "#666" }}>Only admin users can manage team members.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const handleSave = (userData) => {
+    if (editingUser === null) {
+      // New user
+      const newUser = {
+        ...userData,
+        id: `usr-${String(users.length + 1).padStart(3, "0")}`,
+        createdAt: "2026-03-19",
+      };
+      setUsers([...users, newUser]);
+      showToast(`${newUser.name} added to the team`);
+    } else {
+      // Edit existing
+      setUsers(users.map((u) => (u.id === editingUser.id ? { ...u, ...userData } : u)));
+      showToast(`${userData.name} updated`);
+    }
+    setEditingUser(undefined);
+  };
+
+  const handleDelete = (user) => {
+    setUsers(users.filter((u) => u.id !== user.id));
+    setDeletingUser(null);
+    showToast(`${user.name} removed from the team`);
+  };
+
+  return (
+    <>
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-[60] animate-slide-up px-5 py-3 rounded-lg text-sm font-medium flex items-center gap-2" style={{ background: "#1a2e1a", border: "1px solid #2d5a2d", color: "#6ee7b7" }}>
+          <span>✓</span> {toast}
+        </div>
+      )}
+
+      <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
+        <div>
+          <h2 className="text-lg font-bold text-white">User Management</h2>
+          <p className="text-xs mt-0.5" style={{ color: "#666" }}>
+            Add team members without additional Semrush seats
+          </p>
+        </div>
+        <button
+          onClick={() => setEditingUser(null)}
+          className="px-4 py-2 rounded-md text-xs font-semibold text-white"
+          style={{ background: "#a78bfa" }}
+        >
+          + Add User
+        </button>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+        {[
+          { label: "Total Users", value: users.length, color: "#e8e8e8" },
+          { label: "Admins", value: users.filter((u) => u.role === "admin").length, color: "#a78bfa" },
+          { label: "Managers", value: users.filter((u) => u.role === "manager").length, color: "#93c5fd" },
+          { label: "Editors", value: users.filter((u) => u.role === "editor" || u.role === "viewer").length, color: "#fbbf24" },
+        ].map((stat) => (
+          <div key={stat.label} className="px-4 py-3 rounded-lg" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+            <div className="text-[11px] font-semibold" style={{ color: "#888" }}>{stat.label}</div>
+            <div className="text-2xl font-bold mt-0.5" style={{ color: stat.color }}>{stat.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* User list */}
+      <div className="rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+        <div className="hidden lg:flex items-center gap-4 px-5 py-2.5" style={{ borderBottom: "1px solid #1e1e22" }}>
+          <div className="w-9" />
+          <span className="flex-1 text-[10px] font-bold tracking-widest uppercase" style={{ color: "#555" }}>User</span>
+          <span className="w-20 text-[10px] font-bold tracking-widest uppercase hidden sm:block" style={{ color: "#555" }}>Role</span>
+          <span className="w-20 text-[10px] font-bold tracking-widest uppercase hidden md:block" style={{ color: "#555" }}>Brands</span>
+          <span className="w-24 text-[10px] font-bold tracking-widest uppercase hidden lg:block" style={{ color: "#555" }}>Added</span>
+          <span className="w-28" />
+        </div>
+        {users.map((user) => (
+          <UserRow
+            key={user.id}
+            user={user}
+            onEdit={setEditingUser}
+            onDelete={setDeletingUser}
+          />
+        ))}
+      </div>
+
+      {/* Role descriptions */}
+      <div className="mt-5 p-4 rounded-lg" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
+        <h4 className="text-xs font-bold mb-3" style={{ color: "#aaa" }}>Role Permissions</h4>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {ROLES.map((role) => (
+            <div key={role.id} className="flex items-start gap-2 text-xs" style={{ color: "#777" }}>
+              <span className="font-semibold capitalize" style={{ color: "#aaa", width: "70px", flexShrink: 0 }}>{role.label}</span>
+              <span>{role.description}</span>
+            </div>
+          ))}
+        </div>
+        <p className="text-[11px] mt-3" style={{ color: "#555" }}>
+          In production, roles enforce server-side — editors can only modify locations for their assigned brands. The API route checks user permissions before proxying to Semrush.
+        </p>
+      </div>
+
+      {/* Modals */}
+      {editingUser !== undefined && (
+        <UserModal
+          user={editingUser}
+          onClose={() => setEditingUser(undefined)}
+          onSave={handleSave}
+        />
+      )}
+      {deletingUser && (
+        <DeleteModal
+          user={deletingUser}
+          onClose={() => setDeletingUser(null)}
+          onConfirm={handleDelete}
+        />
+      )}
+    </>
+  );
+}
