@@ -258,12 +258,12 @@ export default function LocationsPage() {
         <div
           className="hidden lg:grid items-center px-4 py-2.5"
           style={{
-            gridTemplateColumns: "4px 1.4fr 1fr 0.65fr 0.55fr 0.6fr 0.55fr 72px",
+            gridTemplateColumns: "4px 1.3fr 0.9fr 0.6fr 0.5fr 0.5fr 0.5fr 30px 72px",
             borderBottom: "1px solid #1e1e22",
           }}
         >
           <span />
-          {["Location", "Address", "Phone", "Status", "Hours", "Updated", ""].map((h, i) => (
+          {["Location", "Address", "Phone", "Status", "Hours", "Updated", "", ""].map((h, i) => (
             <span key={i} className="text-[10px] font-bold tracking-widest uppercase" style={{ color: "#555" }}>
               {h}
             </span>
@@ -273,6 +273,7 @@ export default function LocationsPage() {
         {/* Rows */}
         {filteredLocations.map((loc, i) => {
           const brandColor = brands.find((b) => b.id === loc.brand)?.color || "#666";
+          const errorCount = (loc.semrushErrors || []).length;
           return (
             <div
               key={loc.id}
@@ -285,7 +286,7 @@ export default function LocationsPage() {
               {/* Desktop row */}
               <div
                 className="hidden lg:grid items-center px-4 py-3"
-                style={{ gridTemplateColumns: "4px 1.4fr 1fr 0.65fr 0.55fr 0.6fr 0.55fr 72px" }}
+                style={{ gridTemplateColumns: "4px 1.3fr 0.9fr 0.6fr 0.5fr 0.5fr 0.5fr 30px 72px" }}
               >
                 <span className="w-[3px] h-7 rounded" style={{ background: brandColor }} />
                 <span className="text-sm font-semibold text-white truncate pr-2">{loc.name}</span>
@@ -294,6 +295,13 @@ export default function LocationsPage() {
                 <StatusBadge status={loc.status} />
                 <HoursBadge hoursStatus={loc.hoursStatus} />
                 <span className="text-[11px]" style={{ color: "#666" }}>{loc.lastUpdated}</span>
+                {errorCount > 0 ? (
+                  <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold" style={{ background: "#2d0a0a", color: "#f87171", border: "1px solid #5c1a1a" }} title={`${errorCount} sync error${errorCount > 1 ? "s" : ""}`}>
+                    {errorCount}
+                  </span>
+                ) : (
+                  <span />
+                )}
                 <button className="px-2.5 py-1 rounded text-[11px] font-semibold" style={{ background: "#222", border: "1px solid #2a2a2e", color: "#888" }}>
                   Edit
                 </button>
@@ -304,6 +312,11 @@ export default function LocationsPage() {
                 <div className="flex items-center gap-2">
                   <span className="w-[3px] h-5 rounded" style={{ background: brandColor }} />
                   <span className="text-sm font-semibold text-white">{loc.name}</span>
+                  {errorCount > 0 && (
+                    <span className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold ml-auto" style={{ background: "#2d0a0a", color: "#f87171", border: "1px solid #5c1a1a" }}>
+                      {errorCount}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-3 text-xs" style={{ color: "#888" }}>
                   <span>{loc.city}, {loc.state}</span>

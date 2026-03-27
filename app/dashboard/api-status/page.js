@@ -4,30 +4,36 @@ import { useState, useEffect } from "react";
 
 export default function ApiStatusPage() {
   const [apiStatus, setApiStatus] = useState(null);
+  const [dbStatus, setDbStatus] = useState(null);
   const [lastPing, setLastPing] = useState("Checking...");
+  const [dbInitializing, setDbInitializing] = useState(false);
 
   useEffect(() => {
     fetch("/api/semrush/token")
       .then((res) => res.json())
-      .then((data) => {
-        setApiStatus(data);
-        setLastPing("Just now");
-      })
-      .catch(() => {
-        setApiStatus({ connected: false, mode: "error" });
-        setLastPing("Failed");
-      });
+      .then((data) => { setApiStatus(data); setLastPing("Just now"); })
+      .catch(() => { setApiStatus({ connected: false, mode: "error" }); setLastPing("Failed"); });
+
+    fetch("/api/db")
+      .then((res) => res.json())
+      .then((data) => setDbStatus(data))
+      .catch(() => setDbStatus({ hasPostgres: false, mode: "memory" }));
 
     const interval = setInterval(() => {
-      fetch("/api/semrush/token")
-        .then((res) => res.json())
-        .then((data) => {
-          setApiStatus(data);
-          setLastPing("Just now");
-        });
+      fetch("/api/semrush/token").then((res) => res.json()).then((data) => { setApiStatus(data); setLastPing("Just now"); });
     }, 60000);
     return () => clearInterval(interval);
   }, []);
+
+  const initDb = async () => {
+    setDbInitializing(true);
+    try {
+      const res = await fetch("/api/db", { method: "POST" });
+      const data = await res.json();
+      setDbStatus({ ...dbStatus, initialized: data.initialized, initResult: data });
+    } catch { }
+    setDbInitializing(false);
+  };
 
   const isLive = apiStatus?.connected && apiStatus?.mode === "live";
 
@@ -55,7 +61,7 @@ export default function ApiStatusPage() {
           { label: "Bearer Token", value: isLive ? "Active" : "Not Set", detail: isLive && apiStatus?.expiresAt ? `Expires ${new Date(apiStatus.expiresAt).toLocaleDateString()}` : "Set SEMRUSH_BEARER_TOKEN in .env.local", color: isLive ? "#34d399" : "#fbbf24" },
           { label: "API Mode", value: isLive ? "Live" : "Demo", detail: isLive ? "Pulling from Semrush API" : "Using demo data", color: isLive ? "#34d399" : "#fbbf24" },
           { label: "Last Check", value: lastPing, detail: "Polled every 60 seconds", color: apiStatus ? "#34d399" : "#f87171" },
-          { label: "API Units", value: "N/A", detail: "Listing API is free", color: "#93c5fd" },
+          { label: "Database", value: dbStatus?.hasPostgres ? "Postgres" : "Memory", detail: dbStatus?.hasPostgres ? "Vercel Postgres connected" : "In-memory (resets on cold start)", color: dbStatus?.hasPostgres ? "#34d399" : "#fbbf24" },
         ].map((card) => (
           <div key={card.label} className="p-4 rounded-lg" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
             <div className="flex justify-between items-center mb-2">
@@ -68,6 +74,54 @@ export default function ApiStatusPage() {
             <div className="text-[11px] mt-0.5" style={{ color: "#555" }}>{card.detail}</div>
           </div>
         ))}
+      </div>
+
+      {/* Database section */}
+      <div className="rounded-xl p-5 mb-6" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+        <h3 className="text-xs font-bold uppercase tracking-wider mb-4" style={{ color: "#aaa" }}>
+          Database Storage
+        </h3>
+        {dbStatus?.hasPostgres ? (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full" style={{ background: "#34d399" }} />
+              <span className="text-sm text-white font-semibold">Vercel Postgres connected</span>
+            </div>
+            <p className="text-xs" style={{ color: "#888" }}>
+              Users and activity log persist across deployments and cold starts.
+            </p>
+            <button
+              onClick={initDb}
+              disabled={dbInitializing}
+              className="px-4 py-2 rounded-md text-xs font-semibold transition-opacity"
+              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa", opacity: dbInitializing ? 0.6 : 1 }}
+            >
+              {dbInitializing ? "Initializing..." : "Initialize / Reset Database"}
+            </button>
+            {dbStatus?.initResult && (
+              <div className="text-[11px] px-3 py-2 rounded" style={{ background: dbStatus.initResult.initialized ? "#0d281820" : "#2d0a0a20", color: dbStatus.initResult.initialized ? "#34d399" : "#f87171", border: `1px solid ${dbStatus.initResult.initialized ? "#2d5a2d40" : "#5c1a1a40"}` }}>
+                {dbStatus.initResult.initialized ? "Tables created and seed data loaded." : `Error: ${dbStatus.initResult.reason}`}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full" style={{ background: "#fbbf24" }} />
+              <span className="text-sm text-white font-semibold">In-memory storage</span>
+            </div>
+            <p className="text-xs" style={{ color: "#888" }}>
+              Users and activity are stored in memory. They persist across page navigations but reset when the serverless function cold starts.
+            </p>
+            <div className="text-xs leading-relaxed p-3 rounded" style={{ background: "#1a1a1d", border: "1px solid #222", color: "#777" }}>
+              <strong style={{ color: "#aaa" }}>To enable persistent storage:</strong>
+              <br />1. In Vercel dashboard: Storage → Create Database → Postgres
+              <br />2. Link the database to this project
+              <br />3. Run <span className="font-mono" style={{ color: "#93c5fd" }}>vercel env pull .env.local</span> to get credentials locally
+              <br />4. Redeploy, then click "Initialize Database" on this page
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Endpoints */}
@@ -138,6 +192,20 @@ export default function ApiStatusPage() {
                 </div>
                 <div className="flex-1 border-t border-dashed" style={{ borderColor: "#333" }} />
                 <span className="text-[10px]" style={{ color: "#555" }}>API routes proxy requests</span>
+              </div>
+
+              <div className="flex justify-center">
+                <span style={{ color: "#555" }}>↓</span>
+              </div>
+
+              {/* Database layer */}
+              <div className="flex items-center gap-3">
+                <div className="px-3 py-2 rounded-md text-center" style={{ background: "#93c5fd20", border: "1px solid #93c5fd40", color: "#93c5fd", minWidth: "140px" }}>
+                  <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">Vercel Postgres</div>
+                  <div className="text-[10px] font-normal" style={{ color: "#93c5fdaa" }}>Users + Activity Log</div>
+                </div>
+                <div className="flex-1 border-t border-dashed" style={{ borderColor: "#333" }} />
+                <span className="text-[10px]" style={{ color: "#555" }}>Persistent storage</span>
               </div>
 
               <div className="flex justify-center">
@@ -216,6 +284,14 @@ export default function ApiStatusPage() {
               </div>
               <div className="flex justify-between">
                 <span>Bulk updates across hundreds of locations</span>
+                <span style={{ color: "#34d399" }}>✓</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Persistent Postgres storage</span>
+                <span style={{ color: "#34d399" }}>✓</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Directory sync error monitoring</span>
                 <span style={{ color: "#34d399" }}>✓</span>
               </div>
             </div>

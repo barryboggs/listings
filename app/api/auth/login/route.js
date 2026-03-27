@@ -1,16 +1,21 @@
 import { NextResponse } from "next/server";
 import { findUser, signToken } from "@/lib/auth";
+import { findUserByEmail } from "@/lib/db";
 
 export async function POST(request) {
   try {
     const { email, password } = await request.json();
 
-    const user = findUser(email, password);
+    // Try database first (includes DEMO_USERS as fallback)
+    let user = await findUserByEmail(email);
+
+    if (!user || user.password !== password) {
+      // Fall back to in-memory DEMO_USERS
+      user = findUser(email, password);
+    }
+
     if (!user) {
-      return NextResponse.json(
-        { error: "Invalid email or password" },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: "Invalid email or password" }, { status: 401 });
     }
 
     const token = await signToken({
@@ -19,7 +24,7 @@ export async function POST(request) {
       name: user.name,
       role: user.role,
       initials: user.initials,
-      brands: user.brands,
+      brands: typeof user.brands === "string" ? JSON.parse(user.brands) : user.brands,
     });
 
     const response = NextResponse.json({
@@ -29,7 +34,7 @@ export async function POST(request) {
         name: user.name,
         role: user.role,
         initials: user.initials,
-        brands: user.brands,
+        brands: typeof user.brands === "string" ? JSON.parse(user.brands) : user.brands,
       },
     });
 
@@ -37,15 +42,12 @@ export async function POST(request) {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
-      maxAge: 60 * 60 * 8, // 8 hours
+      maxAge: 60 * 60 * 8,
       path: "/",
     });
 
     return response;
   } catch (error) {
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
