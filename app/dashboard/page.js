@@ -90,6 +90,17 @@ export default function LocationsPage() {
     setTimeout(() => setToast(null), 3500);
   };
 
+  // Log activity helper
+  const logActivity = async (action, location, brand, details) => {
+    try {
+      await fetch("/api/activity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, location, brand, details }),
+      });
+    } catch { /* non-blocking */ }
+  };
+
   // Save handler — calls the API proxy, then refreshes locations
   const handleSave = async (locationData) => {
     setEditingLocation(null);
@@ -106,7 +117,8 @@ export default function LocationsPage() {
             ? "Location updated — pushed to Semrush API"
             : "Location updated (demo mode)"
         );
-        fetchLocations(); // Refresh data
+        logActivity("Updated location", locationData.name, locationData.brand, `Updated via edit modal`);
+        fetchLocations();
       } else {
         showToast(`Error: ${result.error || "Update failed"}`);
       }
@@ -126,10 +138,17 @@ export default function LocationsPage() {
       });
       const result = await res.json();
       if (result.success) {
+        const brandName = brands.find((b) => b.id === data.brand)?.name || data.brand;
         showToast(
           result.source === "semrush"
             ? `Bulk update pushed — ${result.updated} locations updated`
             : `Bulk update complete — ${data.locationIds.length} locations (demo mode)`
+        );
+        logActivity(
+          "Bulk update",
+          `${brandName} — ${data.locationIds.length} locations`,
+          data.brand,
+          `Field: ${data.field}`
         );
         fetchLocations();
       } else {
