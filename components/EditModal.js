@@ -1,20 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { BRANDS, DEFAULT_HOURS } from "@/lib/data";
+import { DEFAULT_HOURS, getBrandConfig } from "@/lib/data";
 
-function getBrandColor(brandId) {
-  return BRANDS.find((b) => b.id === brandId)?.color || "#666";
-}
-
-export default function EditModal({ location, onClose, onSave }) {
+export default function EditModal({ location, brands: brandsList, onClose, onSave }) {
+  const brandData = (brandsList || []).find((b) => b.id === location.brand) || getBrandConfig(location.brand);
+  const brandColor = brandData?.color || "#666";
   const [formData, setFormData] = useState({ ...location });
   const [hours, setHours] = useState({ ...DEFAULT_HOURS });
   const [activeTab, setActiveTab] = useState("details");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-
-  const brandColor = getBrandColor(location.brand);
 
   const handleSave = () => {
     setSaving(true);

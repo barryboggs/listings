@@ -6,10 +6,9 @@ import {
   transformLocation,
   detectBrand,
 } from "@/lib/semrush";
-import { LOCATIONS as DEMO_LOCATIONS } from "@/lib/data";
+import { LOCATIONS as DEMO_LOCATIONS, getBrandConfig } from "@/lib/data";
 
 export async function GET(request) {
-  // Verify auth
   const token = request.cookies.get("auth-token")?.value;
   if (!token) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -19,23 +18,21 @@ export async function GET(request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Check if Semrush API is configured
   const { hasToken } = getTokenStatus();
 
   if (!hasToken) {
     const filtered = DEMO_LOCATIONS.filter((loc) =>
-      user.brands.includes(loc.brand)
+      user.brands.includes("*") || user.brands.includes(loc.brand)
     );
+    const brands = deriveBrands(filtered);
     return NextResponse.json({
       locations: filtered,
+      brands,
       source: "demo",
-      message:
-        "Using demo data — set SEMRUSH_BEARER_TOKEN in .env.local to connect live API",
+      message: "Using demo data — set SEMRUSH_BEARER_TOKEN in .env.local to connect live API",
     });
   }
 
-  // Fetch live data from Semrush
-  // getAllLocations() paginates through data.content[] across all pages
   try {
     const raw = await getAllLocations();
 
@@ -45,28 +42,64 @@ export async function GET(request) {
       return transformed;
     });
 
-    // Filter by user's brand access
-    const filtered = locations.filter(
-      (loc) => user.brands.includes(loc.brand) || loc.brand === "unknown"
-    );
+    // Admin users (brands: ["*"]) see everything, others are filtered
+    const hasAllAccess = user.brands.includes("*");
+    const filtered = hasAllAccess
+      ? locations
+      : locations.filter((loc) => user.brands.includes(loc.brand));
+
+    const brands = deriveBrands(filtered);
 
     return NextResponse.json({
       locations: filtered,
+      brands,
       source: "semrush",
       total: raw.length,
     });
   } catch (error) {
     console.error("Semrush API error:", error.message);
 
-    // Fallback to demo data
     const filtered = DEMO_LOCATIONS.filter((loc) =>
-      user.brands.includes(loc.brand)
+      user.brands.includes("*") || user.brands.includes(loc.brand)
     );
+    const brands = deriveBrands(filtered);
     return NextResponse.json({
       locations: filtered,
+      brands,
       source: "demo",
       error: error.message,
       message: "Semrush API error — falling back to demo data",
     });
   }
+}
+
+/**
+ * Build a brands summary array from the actual location data.
+ * Returns: [{ id, name, color, locationCount }]
+ */
+function deriveBrands(locations) {
+  const brandMap = new Map();
+
+  for (const loc of locations) {
+    const brandId = loc.brand || "unknown";
+    if (!brandMap.has(brandId)) {
+      brandMap.set(brandId, { count: 0 });
+    }
+    brandMap.get(brandId).count++;
+  }
+
+  const brands = [];
+  for (const [brandId, { count }] of brandMap) {
+    const config = getBrandConfig(brandId);
+    brands.push({
+      id: config.id,
+      name: config.name,
+      color: config.color,
+      locationCount: count,
+    });
+  }
+
+  // Sort by location count descending
+  brands.sort((a, b) => b.locationCount - a.locationCount);
+  return brands;
 }

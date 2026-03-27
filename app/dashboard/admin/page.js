@@ -1,25 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useUser } from "../layout";
-import { BRANDS, ROLES } from "@/lib/data";
+import { ROLES, getBrandConfig } from "@/lib/data";
 import { DEMO_USERS } from "@/lib/auth";
 
-function UserRow({ user, onEdit, onDelete }) {
-  const brandColors = {
-    carstar: "#E31837",
-    take5: "#0066CC",
-    autoglass: "#00875A",
-  };
-
+function UserRow({ user, brands, onEdit, onDelete }) {
   const roleColors = {
     admin: { bg: "#a78bfa20", color: "#a78bfa" },
     manager: { bg: "#93c5fd20", color: "#93c5fd" },
     editor: { bg: "#fbbf2420", color: "#fbbf24" },
     viewer: { bg: "#88888820", color: "#888888" },
   };
-
   const rc = roleColors[user.role] || roleColors.viewer;
+  const isAllBrands = user.brands.includes("*");
 
   return (
     <div className="flex items-center gap-4 px-5 py-3.5 transition-colors hover:bg-[#1a1a1d]" style={{ borderBottom: "1px solid #1a1a1d" }}>
@@ -37,9 +31,18 @@ function UserRow({ user, onEdit, onDelete }) {
       </span>
 
       <div className="hidden md:flex items-center gap-1">
-        {user.brands.map((b) => (
-          <span key={b} className="w-2.5 h-2.5 rounded-sm" style={{ background: brandColors[b] }} title={BRANDS.find((br) => br.id === b)?.name} />
-        ))}
+        {isAllBrands ? (
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded" style={{ background: "#34d39920", color: "#34d399" }}>
+            All Brands
+          </span>
+        ) : (
+          user.brands.map((b) => {
+            const config = getBrandConfig(b);
+            return (
+              <span key={b} className="w-2.5 h-2.5 rounded-sm" style={{ background: config.color }} title={config.name} />
+            );
+          })
+        )}
       </div>
 
       <div className="text-[11px] hidden lg:block" style={{ color: "#555" }}>
@@ -60,7 +63,7 @@ function UserRow({ user, onEdit, onDelete }) {
   );
 }
 
-function UserModal({ user, onClose, onSave }) {
+function UserModal({ user, brands, onClose, onSave }) {
   const isNew = !user;
   const [form, setForm] = useState(
     user || {
@@ -73,14 +76,25 @@ function UserModal({ user, onClose, onSave }) {
     }
   );
   const [saving, setSaving] = useState(false);
+  const isAllBrands = form.brands.includes("*");
+
+  const toggleAllBrands = () => {
+    if (isAllBrands) {
+      setForm({ ...form, brands: [] });
+    } else {
+      setForm({ ...form, brands: ["*"] });
+    }
+  };
 
   const toggleBrand = (brandId) => {
-    setForm((prev) => ({
-      ...prev,
-      brands: prev.brands.includes(brandId)
-        ? prev.brands.filter((b) => b !== brandId)
-        : [...prev.brands, brandId],
-    }));
+    // If switching from "all" to individual, start fresh
+    let currentBrands = isAllBrands ? [] : [...form.brands];
+    if (currentBrands.includes(brandId)) {
+      currentBrands = currentBrands.filter((b) => b !== brandId);
+    } else {
+      currentBrands.push(brandId);
+    }
+    setForm({ ...form, brands: currentBrands });
   };
 
   const handleNameChange = (name) => {
@@ -93,14 +107,14 @@ function UserModal({ user, onClose, onSave }) {
 
   const handleSave = () => {
     setSaving(true);
-    setTimeout(() => {
-      onSave(form);
-    }, 800);
+    setTimeout(() => onSave(form), 800);
   };
+
+  const hasValidBrands = isAllBrands || form.brands.length > 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}>
-      <div className="animate-fade-scale w-full max-w-md flex flex-col rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #2a2a2e" }}>
+      <div className="animate-fade-scale w-full max-w-md max-h-[85vh] flex flex-col rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #2a2a2e" }}>
         <div className="px-6 py-5 flex justify-between items-start" style={{ borderBottom: "1px solid #2a2a2e" }}>
           <div>
             <span className="text-[11px] font-semibold uppercase tracking-wider block mb-1" style={{ color: "#888" }}>
@@ -115,71 +129,35 @@ function UserModal({ user, onClose, onSave }) {
           </button>
         </div>
 
-        <div className="px-6 py-5 space-y-4 overflow-y-auto">
+        <div className="px-6 py-5 space-y-4 overflow-y-auto flex-1">
           {/* Name */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
-              Full Name
-            </label>
-            <input
-              value={form.name}
-              onChange={(e) => handleNameChange(e.target.value)}
-              placeholder="Jane Smith"
-              className="w-full px-3 py-2.5 rounded-md text-sm"
-              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
-            />
+            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>Full Name</label>
+            <input value={form.name} onChange={(e) => handleNameChange(e.target.value)} placeholder="Jane Smith" className="w-full px-3 py-2.5 rounded-md text-sm" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }} />
           </div>
 
           {/* Email */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
-              Email
-            </label>
-            <input
-              type="email"
-              value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })}
-              placeholder="jane@drivenbrands.com"
-              className="w-full px-3 py-2.5 rounded-md text-sm"
-              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
-            />
+            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>Email</label>
+            <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="jane@drivenbrands.com" className="w-full px-3 py-2.5 rounded-md text-sm" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }} />
           </div>
 
-          {/* Password (new user only) */}
+          {/* Password (new only) */}
           {isNew && (
             <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
-                Temporary Password
-              </label>
-              <input
-                type="text"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                placeholder="Set initial password"
-                className="w-full px-3 py-2.5 rounded-md text-sm"
-                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
-              />
-              <p className="text-[11px] mt-1" style={{ color: "#555" }}>
-                User can change this after first login (in production)
-              </p>
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>Temporary Password</label>
+              <input type="text" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Set initial password" className="w-full px-3 py-2.5 rounded-md text-sm" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }} />
+              <p className="text-[11px] mt-1" style={{ color: "#555" }}>User can change this after first login (in production)</p>
             </div>
           )}
 
           {/* Role */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>
-              Role
-            </label>
+            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Role</label>
             <div className="space-y-1.5">
               {ROLES.map((role) => (
                 <label key={role.id} className="flex gap-3 px-3 py-2.5 rounded-md cursor-pointer transition-colors" style={{ background: form.role === role.id ? "#1c1c1f" : "transparent", border: `1px solid ${form.role === role.id ? "#2a2a2e" : "transparent"}` }}>
-                  <input
-                    type="radio"
-                    name="role"
-                    checked={form.role === role.id}
-                    onChange={() => setForm({ ...form, role: role.id })}
-                    style={{ accentColor: "#a78bfa", marginTop: "1px" }}
-                  />
+                  <input type="radio" name="role" checked={form.role === role.id} onChange={() => setForm({ ...form, role: role.id })} style={{ accentColor: "#a78bfa", marginTop: "1px" }} />
                   <div>
                     <div className="text-xs font-semibold text-white">{role.label}</div>
                     <div className="text-[11px]" style={{ color: "#666" }}>{role.description}</div>
@@ -191,22 +169,39 @@ function UserModal({ user, onClose, onSave }) {
 
           {/* Brand access */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>
-              Brand Access
-            </label>
+            <label className="block text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Brand Access</label>
+
+            {/* All brands toggle */}
+            <button
+              type="button"
+              onClick={toggleAllBrands}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors mb-2 w-full"
+              style={{
+                background: isAllBrands ? "#34d39918" : "#1c1c1f",
+                border: `1.5px solid ${isAllBrands ? "#34d399" : "#2a2a2e"}`,
+                color: isAllBrands ? "#34d399" : "#888",
+              }}
+            >
+              <span className="text-sm">{isAllBrands ? "✓" : "○"}</span>
+              All Brands (full access)
+            </button>
+
+            {/* Individual brands */}
             <div className="flex gap-2 flex-wrap">
-              {BRANDS.map((b) => {
-                const active = form.brands.includes(b.id);
+              {brands.map((b) => {
+                const active = !isAllBrands && form.brands.includes(b.id);
                 return (
                   <button
                     key={b.id}
                     type="button"
                     onClick={() => toggleBrand(b.id)}
+                    disabled={isAllBrands}
                     className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors"
                     style={{
                       background: active ? b.color + "18" : "#1c1c1f",
                       border: `1.5px solid ${active ? b.color : "#2a2a2e"}`,
-                      color: active ? b.color : "#888",
+                      color: active ? b.color : isAllBrands ? "#444" : "#888",
+                      opacity: isAllBrands ? 0.5 : 1,
                     }}
                   >
                     <span className="w-2 h-2 rounded-sm" style={{ background: b.color }} />
@@ -215,24 +210,17 @@ function UserModal({ user, onClose, onSave }) {
                 );
               })}
             </div>
-            {form.brands.length === 0 && (
+            {!hasValidBrands && (
               <p className="text-[11px] mt-1.5" style={{ color: "#f87171" }}>
-                Select at least one brand
+                Select at least one brand or enable "All Brands"
               </p>
             )}
           </div>
         </div>
 
         <div className="px-6 py-4 flex justify-end gap-2" style={{ borderTop: "1px solid #2a2a2e" }}>
-          <button onClick={onClose} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || !form.name || !form.email || form.brands.length === 0}
-            className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
-            style={{ background: "#a78bfa", opacity: saving || !form.name || !form.email || form.brands.length === 0 ? 0.5 : 1 }}
-          >
+          <button onClick={onClose} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>Cancel</button>
+          <button onClick={handleSave} disabled={saving || !form.name || !form.email || !hasValidBrands} className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity" style={{ background: "#a78bfa", opacity: saving || !form.name || !form.email || !hasValidBrands ? 0.5 : 1 }}>
             {saving ? "Saving..." : isNew ? "Add User" : "Save Changes"}
           </button>
         </div>
@@ -252,12 +240,8 @@ function DeleteModal({ user, onClose, onConfirm }) {
           </p>
         </div>
         <div className="px-6 py-4 flex justify-end gap-2" style={{ borderTop: "1px solid #2a2a2e" }}>
-          <button onClick={onClose} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>
-            Cancel
-          </button>
-          <button onClick={() => onConfirm(user)} className="px-5 py-2 rounded-md text-xs font-semibold text-white" style={{ background: "#dc2626" }}>
-            Remove User
-          </button>
+          <button onClick={onClose} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>Cancel</button>
+          <button onClick={() => onConfirm(user)} className="px-5 py-2 rounded-md text-xs font-semibold text-white" style={{ background: "#dc2626" }}>Remove User</button>
         </div>
       </div>
     </div>
@@ -267,9 +251,18 @@ function DeleteModal({ user, onClose, onConfirm }) {
 export default function AdminPage() {
   const currentUser = useUser();
   const [users, setUsers] = useState(DEMO_USERS.map(({ password, ...u }) => u));
-  const [editingUser, setEditingUser] = useState(undefined); // undefined=closed, null=new, object=edit
+  const [editingUser, setEditingUser] = useState(undefined);
   const [deletingUser, setDeletingUser] = useState(null);
   const [toast, setToast] = useState(null);
+  const [brands, setBrands] = useState([]);
+
+  // Fetch brands from the locations API
+  useEffect(() => {
+    fetch("/api/semrush/locations")
+      .then((res) => res.json())
+      .then((data) => setBrands(data.brands || []))
+      .catch(() => {});
+  }, []);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -290,16 +283,14 @@ export default function AdminPage() {
 
   const handleSave = (userData) => {
     if (editingUser === null) {
-      // New user
       const newUser = {
         ...userData,
         id: `usr-${String(users.length + 1).padStart(3, "0")}`,
-        createdAt: "2026-03-19",
+        createdAt: new Date().toISOString().split("T")[0],
       };
       setUsers([...users, newUser]);
       showToast(`${newUser.name} added to the team`);
     } else {
-      // Edit existing
       setUsers(users.map((u) => (u.id === editingUser.id ? { ...u, ...userData } : u)));
       showToast(`${userData.name} updated`);
     }
@@ -314,7 +305,6 @@ export default function AdminPage() {
 
   return (
     <>
-      {/* Toast */}
       {toast && (
         <div className="fixed bottom-6 right-6 z-[60] animate-slide-up px-5 py-3 rounded-lg text-sm font-medium flex items-center gap-2" style={{ background: "#1a2e1a", border: "1px solid #2d5a2d", color: "#6ee7b7" }}>
           <span>✓</span> {toast}
@@ -325,14 +315,10 @@ export default function AdminPage() {
         <div>
           <h2 className="text-lg font-bold text-white">User Management</h2>
           <p className="text-xs mt-0.5" style={{ color: "#666" }}>
-            Add team members without additional Semrush seats
+            Add team members without additional Semrush seats — {brands.length} brands available
           </p>
         </div>
-        <button
-          onClick={() => setEditingUser(null)}
-          className="px-4 py-2 rounded-md text-xs font-semibold text-white"
-          style={{ background: "#a78bfa" }}
-        >
+        <button onClick={() => setEditingUser(null)} className="px-4 py-2 rounded-md text-xs font-semibold text-white" style={{ background: "#a78bfa" }}>
           + Add User
         </button>
       </div>
@@ -343,7 +329,7 @@ export default function AdminPage() {
           { label: "Total Users", value: users.length, color: "#e8e8e8" },
           { label: "Admins", value: users.filter((u) => u.role === "admin").length, color: "#a78bfa" },
           { label: "Managers", value: users.filter((u) => u.role === "manager").length, color: "#93c5fd" },
-          { label: "Editors", value: users.filter((u) => u.role === "editor" || u.role === "viewer").length, color: "#fbbf24" },
+          { label: "Editors / Viewers", value: users.filter((u) => u.role === "editor" || u.role === "viewer").length, color: "#fbbf24" },
         ].map((stat) => (
           <div key={stat.label} className="px-4 py-3 rounded-lg" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
             <div className="text-[11px] font-semibold" style={{ color: "#888" }}>{stat.label}</div>
@@ -354,21 +340,8 @@ export default function AdminPage() {
 
       {/* User list */}
       <div className="rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
-        <div className="hidden lg:flex items-center gap-4 px-5 py-2.5" style={{ borderBottom: "1px solid #1e1e22" }}>
-          <div className="w-9" />
-          <span className="flex-1 text-[10px] font-bold tracking-widest uppercase" style={{ color: "#555" }}>User</span>
-          <span className="w-20 text-[10px] font-bold tracking-widest uppercase hidden sm:block" style={{ color: "#555" }}>Role</span>
-          <span className="w-20 text-[10px] font-bold tracking-widest uppercase hidden md:block" style={{ color: "#555" }}>Brands</span>
-          <span className="w-24 text-[10px] font-bold tracking-widest uppercase hidden lg:block" style={{ color: "#555" }}>Added</span>
-          <span className="w-28" />
-        </div>
         {users.map((user) => (
-          <UserRow
-            key={user.id}
-            user={user}
-            onEdit={setEditingUser}
-            onDelete={setDeletingUser}
-          />
+          <UserRow key={user.id} user={user} brands={brands} onEdit={setEditingUser} onDelete={setDeletingUser} />
         ))}
       </div>
 
@@ -384,24 +357,16 @@ export default function AdminPage() {
           ))}
         </div>
         <p className="text-[11px] mt-3" style={{ color: "#555" }}>
-          In production, roles enforce server-side — editors can only modify locations for their assigned brands. The API route checks user permissions before proxying to Semrush.
+          Users with "All Brands" access see every location. In production, roles enforce server-side — editors can only modify locations for their assigned brands.
         </p>
       </div>
 
       {/* Modals */}
       {editingUser !== undefined && (
-        <UserModal
-          user={editingUser}
-          onClose={() => setEditingUser(undefined)}
-          onSave={handleSave}
-        />
+        <UserModal user={editingUser} brands={brands} onClose={() => setEditingUser(undefined)} onSave={handleSave} />
       )}
       {deletingUser && (
-        <DeleteModal
-          user={deletingUser}
-          onClose={() => setDeletingUser(null)}
-          onConfirm={handleDelete}
-        />
+        <DeleteModal user={deletingUser} onClose={() => setDeletingUser(null)} onConfirm={handleDelete} />
       )}
     </>
   );

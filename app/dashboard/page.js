@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
-import { BRANDS } from "@/lib/data";
 import EditModal from "@/components/EditModal";
 import BulkModal from "@/components/BulkModal";
 
@@ -34,12 +33,13 @@ function HoursBadge({ hoursStatus }) {
 }
 
 export default function LocationsPage() {
-  const [activeBrands, setActiveBrands] = useState(new Set(["carstar", "take5", "autoglass"]));
+  const [activeBrands, setActiveBrands] = useState(null); // null until loaded
   const [search, setSearch] = useState("");
   const [editingLocation, setEditingLocation] = useState(null);
   const [bulkBrand, setBulkBrand] = useState(null);
   const [toast, setToast] = useState(null);
   const [locations, setLocations] = useState([]);
+  const [brands, setBrands] = useState([]);
   const [dataSource, setDataSource] = useState("loading");
   const [loading, setLoading] = useState(true);
 
@@ -49,7 +49,12 @@ export default function LocationsPage() {
       const res = await fetch("/api/semrush/locations");
       const data = await res.json();
       setLocations(data.locations || []);
+      setBrands(data.brands || []);
       setDataSource(data.source || "unknown");
+      // First load: activate all brands
+      if (!activeBrands && data.brands) {
+        setActiveBrands(new Set(data.brands.map((b) => b.id)));
+      }
     } catch {
       setDataSource("error");
     } finally {
@@ -68,6 +73,7 @@ export default function LocationsPage() {
   };
 
   const filteredLocations = useMemo(() => {
+    if (!activeBrands) return [];
     return locations.filter(
       (loc) =>
         activeBrands.has(loc.brand) &&
@@ -169,17 +175,14 @@ export default function LocationsPage() {
       {!loading && (
         <>
       {/* Summary row */}
-      <div className="grid grid-cols-3 gap-3 mb-5">
-        {BRANDS.map((b) => (
-          <div key={b.id} className="px-4 py-3 rounded-lg" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+      <div className="flex gap-3 mb-5 flex-wrap">
+        {brands.map((b) => (
+          <div key={b.id} className="px-4 py-3 rounded-lg flex-1 min-w-[160px]" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
             <div className="flex items-center gap-2 mb-1">
               <span className="w-2 h-2 rounded-sm" style={{ background: b.color }} />
               <span className="text-[11px] font-semibold" style={{ color: "#888" }}>{b.name}</span>
             </div>
             <div className="text-xl font-bold text-white">{b.locationCount}</div>
-            <div className="text-[11px]" style={{ color: "#555" }}>
-              {locations.filter((l) => l.brand === b.id).length} loaded
-            </div>
           </div>
         ))}
       </div>
@@ -187,8 +190,8 @@ export default function LocationsPage() {
       {/* Brand filters + Search */}
       <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
         <div className="flex gap-2 flex-wrap">
-          {BRANDS.map((b) => {
-            const active = activeBrands.has(b.id);
+          {brands.map((b) => {
+            const active = activeBrands?.has(b.id);
             return (
               <button
                 key={b.id}
@@ -217,7 +220,7 @@ export default function LocationsPage() {
 
       {/* Bulk action row */}
       <div className="flex gap-2 mb-4 flex-wrap">
-        {BRANDS.filter((b) => activeBrands.has(b.id)).map((b) => (
+        {brands.filter((b) => activeBrands?.has(b.id)).map((b) => (
           <button
             key={b.id}
             onClick={() => setBulkBrand(b.id)}
@@ -250,7 +253,7 @@ export default function LocationsPage() {
 
         {/* Rows */}
         {filteredLocations.map((loc, i) => {
-          const brandColor = BRANDS.find((b) => b.id === loc.brand)?.color || "#666";
+          const brandColor = brands.find((b) => b.id === loc.brand)?.color || "#666";
           return (
             <div
               key={loc.id}
@@ -312,6 +315,7 @@ export default function LocationsPage() {
       {editingLocation && (
         <EditModal
           location={editingLocation}
+          brands={brands}
           onClose={() => setEditingLocation(null)}
           onSave={handleSave}
         />
@@ -319,6 +323,7 @@ export default function LocationsPage() {
       {bulkBrand && (
         <BulkModal
           brandId={bulkBrand}
+          brands={brands}
           locations={locations}
           onClose={() => setBulkBrand(null)}
           onSave={handleBulkSave}

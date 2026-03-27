@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { BRANDS, ACTIVITY_LOG } from "@/lib/data";
+import { ACTIVITY_LOG, getBrandConfig } from "@/lib/data";
 
 function getBrandColor(brandId) {
-  return BRANDS.find((b) => b.id === brandId)?.color || "#666";
+  return getBrandConfig(brandId).color;
 }
 
 function formatTime(isoString) {
@@ -49,9 +49,10 @@ export default function ActivityPage() {
             style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa" }}
           >
             <option value="all">All Brands</option>
-            {BRANDS.map((b) => (
-              <option key={b.id} value={b.id}>{b.name}</option>
-            ))}
+            {[...new Set(ACTIVITY_LOG.map((a) => a.brand))].map((brandId) => {
+              const b = getBrandConfig(brandId);
+              return <option key={b.id} value={b.id}>{b.name}</option>;
+            })}
           </select>
           <select
             value={filterUser}
