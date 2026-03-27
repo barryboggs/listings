@@ -20,7 +20,12 @@ export async function GET(request) {
   const token = request.cookies.get("auth-token")?.value;
   if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const hasPostgres = !!(process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING);
+  const hasPostgres = !!(
+    process.env.POSTGRES_URL ||
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL_NON_POOLING ||
+    process.env.DATABASE_URL_UNPOOLED
+  );
   return NextResponse.json({
     hasPostgres,
     mode: hasPostgres ? "postgres" : "memory",
