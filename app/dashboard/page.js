@@ -178,7 +178,7 @@ export default function LocationsPage() {
             </div>
             <div className="text-xl font-bold text-white">{b.locationCount}</div>
             <div className="text-[11px]" style={{ color: "#555" }}>
-              {LOCATIONS.filter((l) => l.brand === b.id).length} shown in demo
+              {locations.filter((l) => l.brand === b.id).length} loaded
             </div>
           </div>
         ))}
