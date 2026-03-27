@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { BRANDS, LOCATIONS } from "@/lib/data";
+import { BRANDS, LOCATIONS as DEMO_LOCATIONS } from "@/lib/data";
 
-export default function BulkModal({ brandId, onClose, onSave }) {
+export default function BulkModal({ brandId, locations: liveLocs, onClose, onSave }) {
   const brandData = BRANDS.find((b) => b.id === brandId);
   const brandColor = brandData?.color || "#888";
-  const brandLocations = LOCATIONS.filter((l) => l.brand === brandId);
+  const allLocations = liveLocs || DEMO_LOCATIONS;
+  const brandLocations = allLocations.filter((l) => l.brand === brandId);
 
   const [bulkField, setBulkField] = useState("hours");
   const [selected, setSelected] = useState(new Set(brandLocations.map((l) => l.id)));

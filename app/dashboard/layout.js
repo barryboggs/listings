@@ -24,6 +24,7 @@ export default function DashboardLayout({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [apiMode, setApiMode] = useState(null);
 
   useEffect(() => {
     fetch("/api/auth/me")
@@ -40,6 +41,12 @@ export default function DashboardLayout({ children }) {
         router.push("/login");
         setLoading(false);
       });
+
+    // Check API mode
+    fetch("/api/semrush/token")
+      .then((res) => res.json())
+      .then((data) => setApiMode(data.mode))
+      .catch(() => setApiMode("demo"));
   }, [router]);
 
   const handleLogout = async () => {
@@ -94,10 +101,14 @@ export default function DashboardLayout({ children }) {
           <div className="flex items-center gap-3">
             <div
               className="px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5"
-              style={{ background: "#1a2e1a", border: "1px solid #2d5a2d", color: "#6ee7b7" }}
+              style={{
+                background: apiMode === "live" ? "#1a2e1a" : "#2d1b00",
+                border: `1px solid ${apiMode === "live" ? "#2d5a2d" : "#5c3a00"}`,
+                color: apiMode === "live" ? "#6ee7b7" : "#fbbf24",
+              }}
             >
-              <span className="w-1.5 h-1.5 rounded-full pulse-dot" style={{ background: "#34d399" }} />
-              API Connected
+              <span className="w-1.5 h-1.5 rounded-full pulse-dot" style={{ background: apiMode === "live" ? "#34d399" : "#fbbf24" }} />
+              {apiMode === "live" ? "API Live" : "Demo Mode"}
             </div>
             <div className="flex items-center gap-2">
               <div
@@ -173,12 +184,15 @@ export default function DashboardLayout({ children }) {
                   API Endpoints
                 </div>
                 <div className="font-mono text-[11px] leading-relaxed" style={{ color: "#555" }}>
+                  <div>GetLocation</div>
                   <div>GetLocations</div>
                   <div>UpdateLocation</div>
                   <div>UpdateLocations</div>
                 </div>
                 <div className="text-[10px] mt-2" style={{ color: "#444" }}>
-                  Rate: 5–10 req/sec
+                  GET: 10 req/sec · PUT: 5 req/sec
+                  <br />
+                  Bulk: 5 req/min, max 50
                 </div>
               </div>
             </div>

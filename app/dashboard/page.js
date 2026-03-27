@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import { BRANDS, LOCATIONS } from "@/lib/data";
+import { useState, useMemo, useEffect } from "react";
+import { BRANDS } from "@/lib/data";
 import EditModal from "@/components/EditModal";
 import BulkModal from "@/components/BulkModal";
 
@@ -39,6 +39,27 @@ export default function LocationsPage() {
   const [editingLocation, setEditingLocation] = useState(null);
   const [bulkBrand, setBulkBrand] = useState(null);
   const [toast, setToast] = useState(null);
+  const [locations, setLocations] = useState([]);
+  const [dataSource, setDataSource] = useState("loading");
+  const [loading, setLoading] = useState(true);
+
+  // Fetch locations from API proxy (which hits Semrush if token is set)
+  const fetchLocations = async () => {
+    try {
+      const res = await fetch("/api/semrush/locations");
+      const data = await res.json();
+      setLocations(data.locations || []);
+      setDataSource(data.source || "unknown");
+    } catch {
+      setDataSource("error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchLocations();
+  }, []);
 
   const toggleBrand = (id) => {
     const next = new Set(activeBrands);
@@ -47,7 +68,7 @@ export default function LocationsPage() {
   };
 
   const filteredLocations = useMemo(() => {
-    return LOCATIONS.filter(
+    return locations.filter(
       (loc) =>
         activeBrands.has(loc.brand) &&
         (search === "" ||
@@ -56,11 +77,61 @@ export default function LocationsPage() {
           loc.state.toLowerCase().includes(search.toLowerCase()) ||
           loc.zip.includes(search))
     );
-  }, [activeBrands, search]);
+  }, [activeBrands, search, locations]);
 
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 3500);
+  };
+
+  // Save handler — calls the API proxy, then refreshes locations
+  const handleSave = async (locationData) => {
+    setEditingLocation(null);
+    try {
+      const res = await fetch(`/api/semrush/locations/${locationData.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(locationData),
+      });
+      const result = await res.json();
+      if (result.success) {
+        showToast(
+          result.source === "semrush"
+            ? "Location updated — pushed to Semrush API"
+            : "Location updated (demo mode)"
+        );
+        fetchLocations(); // Refresh data
+      } else {
+        showToast(`Error: ${result.error || "Update failed"}`);
+      }
+    } catch {
+      showToast("Network error — please try again");
+    }
+  };
+
+  // Bulk save handler
+  const handleBulkSave = async (data) => {
+    setBulkBrand(null);
+    try {
+      const res = await fetch("/api/semrush/bulk-update", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const result = await res.json();
+      if (result.success) {
+        showToast(
+          result.source === "semrush"
+            ? `Bulk update pushed — ${result.updated} locations updated`
+            : `Bulk update complete — ${data.locationIds.length} locations (demo mode)`
+        );
+        fetchLocations();
+      } else {
+        showToast(`Bulk update had ${result.failed} errors`);
+      }
+    } catch {
+      showToast("Network error — please try again");
+    }
   };
 
   return (
@@ -72,6 +143,31 @@ export default function LocationsPage() {
         </div>
       )}
 
+      {/* Data source banner */}
+      {dataSource === "demo" && !loading && (
+        <div className="mb-4 px-4 py-2.5 rounded-lg text-xs flex items-center gap-2" style={{ background: "#2d1b0030", border: "1px solid #fbbf2430", color: "#fbbf24" }}>
+          <span>⚠</span>
+          <span className="font-semibold">Demo Mode</span>
+          <span style={{ color: "#fbbf24aa" }}>— Set SEMRUSH_BEARER_TOKEN in .env.local to pull live data</span>
+        </div>
+      )}
+      {dataSource === "semrush" && !loading && (
+        <div className="mb-4 px-4 py-2.5 rounded-lg text-xs flex items-center gap-2" style={{ background: "#0d281830", border: "1px solid #2d5a2d30", color: "#34d399" }}>
+          <span className="w-1.5 h-1.5 rounded-full pulse-dot" style={{ background: "#34d399" }} />
+          <span className="font-semibold">Live</span>
+          <span style={{ color: "#34d399aa" }}>— Pulling from Semrush Listing Management API</span>
+        </div>
+      )}
+
+      {/* Loading state */}
+      {loading && (
+        <div className="flex items-center justify-center py-20">
+          <div className="text-sm" style={{ color: "#666" }}>Fetching locations...</div>
+        </div>
+      )}
+
+      {!loading && (
+        <>
       {/* Summary row */}
       <div className="grid grid-cols-3 gap-3 mb-5">
         {BRANDS.map((b) => (
@@ -208,7 +304,8 @@ export default function LocationsPage() {
       </div>
 
       <div className="mt-2.5 text-[11px] text-right" style={{ color: "#444" }}>
-        Showing {filteredLocations.length} of {LOCATIONS.length} demo locations
+        Showing {filteredLocations.length} of {locations.length} locations
+        {dataSource === "demo" && " (demo data)"}
       </div>
 
       {/* Modals */}
@@ -216,21 +313,18 @@ export default function LocationsPage() {
         <EditModal
           location={editingLocation}
           onClose={() => setEditingLocation(null)}
-          onSave={() => {
-            setEditingLocation(null);
-            showToast("Location updated — pushed to Semrush API");
-          }}
+          onSave={handleSave}
         />
       )}
       {bulkBrand && (
         <BulkModal
           brandId={bulkBrand}
+          locations={locations}
           onClose={() => setBulkBrand(null)}
-          onSave={(data) => {
-            setBulkBrand(null);
-            showToast(`Bulk update pushed — ${data.locationIds.length} locations updated`);
-          }}
+          onSave={handleBulkSave}
         />
+      )}
+      </>
       )}
     </>
   );

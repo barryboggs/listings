@@ -22,7 +22,7 @@ export default function EditModal({ location, onClose, onSave }) {
       setSaving(false);
       setSaved(true);
       setTimeout(() => {
-        onSave(formData);
+        onSave({ ...formData, businessHours: hours });
       }, 600);
     }, 1500);
   };

@@ -3,21 +3,39 @@
 import { useState, useEffect } from "react";
 
 export default function ApiStatusPage() {
-  const [uptime, setUptime] = useState(99.97);
-  const [lastPing, setLastPing] = useState("Just now");
+  const [apiStatus, setApiStatus] = useState(null);
+  const [lastPing, setLastPing] = useState("Checking...");
 
-  // Simulate live ping
   useEffect(() => {
+    fetch("/api/semrush/token")
+      .then((res) => res.json())
+      .then((data) => {
+        setApiStatus(data);
+        setLastPing("Just now");
+      })
+      .catch(() => {
+        setApiStatus({ connected: false, mode: "error" });
+        setLastPing("Failed");
+      });
+
     const interval = setInterval(() => {
-      setLastPing("Just now");
-    }, 30000);
+      fetch("/api/semrush/token")
+        .then((res) => res.json())
+        .then((data) => {
+          setApiStatus(data);
+          setLastPing("Just now");
+        });
+    }, 60000);
     return () => clearInterval(interval);
   }, []);
 
+  const isLive = apiStatus?.connected && apiStatus?.mode === "live";
+
   const endpoints = [
-    { method: "GET", path: "/listing-management/v1/external/locations", rate: "10 req/sec", desc: "Retrieve all location IDs and data", status: "ok" },
-    { method: "PUT", path: "/listing-management/v1/external/locations/{id}", rate: "5 req/sec", desc: "Update a single location", status: "ok" },
-    { method: "PUT", path: "/listing-management/v1/external/locations", rate: "5 req/sec", desc: "Bulk update multiple locations", status: "ok" },
+    { method: "GET", path: "/external/locations/:locationId", rate: "10 req/sec", desc: "Get a single location by ID", status: "ok" },
+    { method: "GET", path: "/external/locations", rate: "10 req/sec", desc: "List all locations (paginated)", status: "ok" },
+    { method: "PUT", path: "/external/locations/:locationId", rate: "5 req/sec", desc: "Update a single location", status: "ok" },
+    { method: "PUT", path: "/external/locations", rate: "5 req/min", desc: "Bulk update up to 50 locations", status: "ok" },
   ];
 
   const methodColors = { GET: "#34d399", PUT: "#fbbf24", POST: "#93c5fd", DELETE: "#f87171" };
@@ -34,9 +52,9 @@ export default function ApiStatusPage() {
       {/* Status cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {[
-          { label: "Bearer Token", value: "Active", detail: "Expires in 47 days", color: "#34d399" },
-          { label: "API Status", value: "Operational", detail: `Last ping: ${lastPing}`, color: "#34d399" },
-          { label: "Uptime", value: `${uptime}%`, detail: "Last 30 days", color: "#34d399" },
+          { label: "Bearer Token", value: isLive ? "Active" : "Not Set", detail: isLive && apiStatus?.expiresAt ? `Expires ${new Date(apiStatus.expiresAt).toLocaleDateString()}` : "Set SEMRUSH_BEARER_TOKEN in .env.local", color: isLive ? "#34d399" : "#fbbf24" },
+          { label: "API Mode", value: isLive ? "Live" : "Demo", detail: isLive ? "Pulling from Semrush API" : "Using demo data", color: isLive ? "#34d399" : "#fbbf24" },
+          { label: "Last Check", value: lastPing, detail: "Polled every 60 seconds", color: apiStatus ? "#34d399" : "#f87171" },
           { label: "API Units", value: "N/A", detail: "Listing API is free", color: "#93c5fd" },
         ].map((card) => (
           <div key={card.label} className="p-4 rounded-lg" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
