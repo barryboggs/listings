@@ -94,6 +94,13 @@ export async function PUT(request) {
           break;
         case "website":
           updateData.website = typeof value === "string" ? value : value?.website || "";
+          // Preserve existing URL params when only changing the base URL
+          updateData.urlParams = existing.urlParams || "";
+          break;
+        case "url_params":
+          // Keep each location's existing base URL, replace just the parameters
+          updateData.website = existing.website || "";
+          updateData.urlParams = typeof value === "string" ? value : "";
           break;
         case "temp_closure":
           updateData.reopenDate = value?.reopenDate || null;

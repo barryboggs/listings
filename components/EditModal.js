@@ -120,6 +120,7 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
     { label: "ZIP / Postal Code", key: "zip", small: true },
     { label: "Phone", key: "phone", full: true },
     { label: "Website URL", key: "website", full: true },
+    { label: "URL Parameters", key: "urlParams", full: true, placeholder: "utm_source=google&utm_medium=organic&utm_campaign=gbp_website", hint: "Query string appended to the URL when sent to Semrush (no leading ?)" },
   ];
 
   return (
@@ -177,13 +178,23 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
               <div className="grid grid-cols-4 gap-3">
                 {fields.map((field) => (
                   <div key={field.key} className={field.full ? "col-span-4" : field.small ? "col-span-1" : "col-span-2"}>
-                    <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>{field.label}</label>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: field.key === "urlParams" ? "#93c5fd" : "#777" }}>{field.label}</label>
                     <input
                       value={formData[field.key] || ""}
                       onChange={(e) => setFormData({ ...formData, [field.key]: e.target.value })}
+                      placeholder={field.placeholder || ""}
                       className="w-full px-3 py-2.5 rounded-md text-sm"
-                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                      style={{
+                        background: field.key === "urlParams" ? "#0c1a2e" : "#1c1c1f",
+                        border: `1px solid ${field.key === "urlParams" ? "#1e3a5f" : "#2a2a2e"}`,
+                        color: "#ddd",
+                        fontFamily: field.key === "urlParams" ? "'JetBrains Mono', monospace" : "inherit",
+                        fontSize: field.key === "urlParams" ? "12px" : undefined,
+                      }}
                     />
+                    {field.hint && (
+                      <p className="text-[10px] mt-1" style={{ color: "#555" }}>{field.hint}</p>
+                    )}
                   </div>
                 ))}
               </div>

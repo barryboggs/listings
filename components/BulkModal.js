@@ -9,6 +9,7 @@ const FIELDS = [
   { id: "hours", label: "Business Hours" },
   { id: "phone", label: "Phone" },
   { id: "website", label: "Website" },
+  { id: "url_params", label: "URL Parameters" },
   { id: "temp_closure", label: "Temp Closure" },
   { id: "holiday_hours", label: "Holiday Hours" },
 ];
@@ -27,6 +28,7 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
   // Value states for each field type
   const [phoneValue, setPhoneValue] = useState("");
   const [websiteValue, setWebsiteValue] = useState("");
+  const [urlParamsValue, setUrlParamsValue] = useState("");
   const [hoursValue, setHoursValue] = useState({ ...DEFAULT_HOURS });
   const [reopenDate, setReopenDate] = useState("");
   const [holidayEntry, setHolidayEntry] = useState({
@@ -61,6 +63,9 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
       case "website":
         value = websiteValue;
         break;
+      case "url_params":
+        value = urlParamsValue;
+        break;
       case "hours":
         value = hoursValue;
         break;
@@ -80,7 +85,7 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
     // Include existing location data so required fields are available
     const existingLocations = brandLocations
       .filter((l) => selected.has(l.id))
-      .map((l) => ({ id: l.id, name: l.name, city: l.city, address: l.address, phone: l.phone }));
+      .map((l) => ({ id: l.id, name: l.name, city: l.city, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams }));
 
     setTimeout(() => {
       setSaving(false);
@@ -147,7 +152,43 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
             <div className="mb-5">
               <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>New Website URL</label>
               <input value={websiteValue} onChange={(e) => setWebsiteValue(e.target.value)} placeholder="https://..." className="w-full px-3 py-2.5 rounded-md text-sm" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }} />
-              <p className="text-[10px] mt-1" style={{ color: "#555" }}>Must start with http:// or https://</p>
+              <p className="text-[10px] mt-1" style={{ color: "#555" }}>Must start with http:// or https://. This replaces the base URL only — existing URL parameters are preserved.</p>
+            </div>
+          )}
+
+          {bulkField === "url_params" && (
+            <div className="mb-5">
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#93c5fd" }}>URL Parameters</label>
+              <input
+                value={urlParamsValue}
+                onChange={(e) => setUrlParamsValue(e.target.value)}
+                placeholder="utm_source=google&utm_medium=organic&utm_campaign=gbp_website"
+                className="w-full px-3 py-2.5 rounded-md text-xs"
+                style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", color: "#ddd", fontFamily: "'JetBrains Mono', monospace" }}
+              />
+              <p className="text-[10px] mt-1.5" style={{ color: "#555" }}>
+                This string is appended to each location's base URL as <span className="font-mono" style={{ color: "#93c5fd" }}>?{urlParamsValue || "..."}</span> when sent to Semrush.
+              </p>
+              <div className="mt-2 px-3 py-2 rounded-md" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
+                <p className="text-[10px]" style={{ color: "#666" }}>
+                  If a location already has query parameters in its URL, they will be replaced with this value. Leave empty to remove all URL parameters.
+                </p>
+              </div>
+
+              {/* Preview */}
+              {brandLocations.length > 0 && (
+                <div className="mt-3">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider block mb-1.5" style={{ color: "#555" }}>Preview (first 3 locations)</span>
+                  <div className="space-y-1">
+                    {brandLocations.filter((l) => selected.has(l.id)).slice(0, 3).map((loc) => (
+                      <div key={loc.id} className="text-[10px] font-mono px-2 py-1 rounded" style={{ background: "#111113", color: "#888" }}>
+                        <span style={{ color: "#555" }}>{loc.website || "no-url"}</span>
+                        {urlParamsValue && <span style={{ color: "#93c5fd" }}>?{urlParamsValue}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
