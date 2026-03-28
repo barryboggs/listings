@@ -199,11 +199,20 @@ export default function AdminPage() {
     );
   }
 
+  const logActivity = async (action, details) => {
+    try {
+      await fetch("/api/activity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, location: "", brand: "system", details }),
+      });
+    } catch {}
+  };
+
   const handleSave = async (userData) => {
     setSaving(true);
     try {
       if (editingUser === null) {
-        // Create new user
         const res = await fetch("/api/users", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -213,11 +222,11 @@ export default function AdminPage() {
         if (res.ok) {
           setUsers([...users, data.user]);
           showToast(`${data.user.name} added to the team`);
+          logActivity("Added user", `${data.user.name} (${data.user.email}) — role: ${data.user.role}`);
         } else {
           showToast(`Error: ${data.error}`);
         }
       } else {
-        // Update existing user
         const res = await fetch("/api/users", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -227,6 +236,7 @@ export default function AdminPage() {
         if (res.ok) {
           setUsers(users.map((u) => (u.id === editingUser.id ? data.user : u)));
           showToast(`${data.user.name} updated`);
+          logActivity("Updated user", `${data.user.name} (${data.user.email}) — role: ${data.user.role}`);
         } else {
           showToast(`Error: ${data.error}`);
         }
@@ -245,6 +255,7 @@ export default function AdminPage() {
       if (res.ok) {
         setUsers(users.filter((u) => u.id !== user.id));
         showToast(`${user.name} removed from the team`);
+        logActivity("Removed user", `${user.name} (${user.email})`);
       } else {
         const data = await res.json();
         showToast(`Error: ${data.error}`);
