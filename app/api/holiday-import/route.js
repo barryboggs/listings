@@ -1,0 +1,256 @@
+import { NextResponse } from "next/server";
+import { verifyToken } from "@/lib/auth";
+
+/**
+ * Parse time strings like "9:00:00 AM", "5:00:00 PM", "12:00:00 PM" into "HH:mm" (24h)
+ */
+function parseTime(timeStr) {
+  if (!timeStr) return null;
+  const str = timeStr.trim();
+  if (!str || str.toLowerCase() === "close" || str.toLowerCase() === "closed") return null;
+
+  // Try parsing "H:MM:SS AM/PM" or "H:MM AM/PM" format
+  const match = str.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/i);
+  if (match) {
+    let hours = parseInt(match[1]);
+    const minutes = match[2];
+    const ampm = match[3].toUpperCase();
+
+    if (ampm === "PM" && hours !== 12) hours += 12;
+    if (ampm === "AM" && hours === 12) hours = 0;
+
+    return `${String(hours).padStart(2, "0")}:${minutes}`;
+  }
+
+  // Try parsing "HH:MM" 24h format directly
+  const match24 = str.match(/^(\d{1,2}):(\d{2})$/);
+  if (match24) {
+    return `${String(parseInt(match24[1])).padStart(2, "0")}:${match24[2]}`;
+  }
+
+  return null;
+}
+
+/**
+ * Parse date strings like "4/5/2026" into "2026-04-05"
+ */
+function parseDate(dateStr) {
+  if (!dateStr) return null;
+  const str = dateStr.trim();
+  if (!str) return null;
+
+  // M/D/YYYY
+  const match = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match) {
+    return `${match[3]}-${String(parseInt(match[1])).padStart(2, "0")}-${String(parseInt(match[2])).padStart(2, "0")}`;
+  }
+
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+
+  return null;
+}
+
+function isClosed(openVal, closeVal) {
+  const o = (openVal || "").trim().toLowerCase();
+  const c = (closeVal || "").trim().toLowerCase();
+  return o === "close" || o === "closed" || c === "close" || c === "closed" || (!o && !c);
+}
+
+function parseCSVLine(line) {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') { inQuotes = !inQuotes; }
+    else if (char === "," && !inQuotes) { result.push(current); current = ""; }
+    else { current += char; }
+  }
+  result.push(current);
+  return result;
+}
+
+// POST - import holiday hours CSV
+export async function POST(request) {
+  const token = request.cookies.get("auth-token")?.value;
+  if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const user = await verifyToken(token);
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const body = await request.json();
+  const { csvData, locations, dryRun } = body;
+
+  if (!csvData) {
+    return NextResponse.json({ error: "csvData is required" }, { status: 400 });
+  }
+
+  // Parse CSV
+  const lines = csvData.split("\n").map((l) => l.replace(/\r/g, "").replace(/^\uFEFF/, "").trim()).filter(Boolean);
+  if (lines.length < 2) {
+    return NextResponse.json({ error: "CSV must have a header row and at least one data row" }, { status: 400 });
+  }
+
+  const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
+  const franchiseIdIdx = header.findIndex((h) => h.includes("franchise") && h.includes("id"));
+  const holiday1Idx = header.findIndex((h) => h === "holiday" || (h.includes("holiday") && !h.includes("open") && !h.includes("close") && !h.includes("2")));
+  const holiday1OpenIdx = header.findIndex((h) => h === "holiday open" || (h.includes("holiday") && h.includes("open") && !h.includes("2")));
+  const holiday1CloseIdx = header.findIndex((h) => h === "holiday close" || (h.includes("holiday") && h.includes("close") && !h.includes("2")));
+  const holiday2Idx = header.findIndex((h) => h === "holiday 2" || (h.includes("holiday") && h.includes("2") && !h.includes("open") && !h.includes("close")));
+  const holiday2OpenIdx = header.findIndex((h) => (h.includes("holiday") && h.includes("open") && h.includes("2")));
+  const holiday2CloseIdx = header.findIndex((h) => (h.includes("holiday") && h.includes("close") && h.includes("2")));
+
+  if (franchiseIdIdx === -1) {
+    return NextResponse.json({ error: "CSV must have a 'Franchise ID' column" }, { status: 400 });
+  }
+  if (holiday1Idx === -1) {
+    return NextResponse.json({ error: "CSV must have a 'Holiday' date column" }, { status: 400 });
+  }
+
+  // Build location lookup by shop ID (from the merged location data)
+  const locByShopId = new Map();
+  for (const loc of (locations || [])) {
+    if (loc.shopId) {
+      locByShopId.set(loc.shopId.toString(), loc);
+    }
+  }
+
+  // Parse rows and build holiday entries
+  const results = {
+    total: 0,
+    matched: 0,
+    unmatched: 0,
+    unmatchedIds: [],
+    closed: 0,
+    specialHours: 0,
+    holiday2Count: 0,
+    updates: [], // { locationId, locationName, shopId, holidayHours: [...] }
+  };
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    const shopId = (cols[franchiseIdIdx] || "").trim();
+    if (!shopId) continue;
+
+    results.total++;
+
+    // Find matching Semrush location
+    const loc = locByShopId.get(shopId);
+    if (!loc) {
+      results.unmatched++;
+      if (results.unmatchedIds.length < 50) results.unmatchedIds.push(shopId);
+      continue;
+    }
+
+    results.matched++;
+
+    // Build holiday hours array for this location
+    const holidayHours = [];
+
+    // Holiday 1
+    const date1 = parseDate(cols[holiday1Idx]);
+    if (date1) {
+      const open1 = cols[holiday1OpenIdx] || "";
+      const close1 = cols[holiday1CloseIdx] || "";
+
+      if (isClosed(open1, close1)) {
+        holidayHours.push({ type: "CLOSED", day: date1 });
+        results.closed++;
+      } else {
+        const from = parseTime(open1);
+        const to = parseTime(close1);
+        if (from && to) {
+          holidayHours.push({ type: "RANGE", day: date1, times: [{ from, to }] });
+          results.specialHours++;
+        }
+      }
+    }
+
+    // Holiday 2 (if present)
+    if (holiday2Idx >= 0) {
+      const date2 = parseDate(cols[holiday2Idx] || "");
+      if (date2) {
+        const open2 = cols[holiday2OpenIdx] || "";
+        const close2 = cols[holiday2CloseIdx] || "";
+        results.holiday2Count++;
+
+        if (isClosed(open2, close2)) {
+          holidayHours.push({ type: "CLOSED", day: date2 });
+        } else {
+          const from = parseTime(open2);
+          const to = parseTime(close2);
+          if (from && to) {
+            holidayHours.push({ type: "RANGE", day: date2, times: [{ from, to }] });
+          }
+        }
+      }
+    }
+
+    if (holidayHours.length > 0) {
+      results.updates.push({
+        locationId: loc.id,
+        locationName: loc.name,
+        shopId,
+        city: loc.city,
+        state: loc.state,
+        holidayHours,
+      });
+    }
+  }
+
+  // If dry run, return preview without pushing
+  if (dryRun) {
+    return NextResponse.json({
+      ...results,
+      dryRun: true,
+      preview: results.updates.slice(0, 20),
+    });
+  }
+
+  // Push updates to Semrush via the single-location update endpoint
+  // We batch through our own API to respect rate limits
+  let pushed = 0;
+  let pushErrors = 0;
+  const errors = [];
+
+  for (const update of results.updates) {
+    try {
+      const res = await fetch(new URL(`/api/semrush/locations/${update.locationId}`, request.url), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: request.headers.get("cookie") || "",
+        },
+        body: JSON.stringify({
+          id: update.locationId,
+          holidayHours: update.holidayHours,
+          // Required fields — pass existing values
+          name: update.locationName,
+          city: update.city,
+          state: update.state,
+        }),
+      });
+
+      if (res.ok) {
+        pushed++;
+      } else {
+        pushErrors++;
+        const errData = await res.json().catch(() => ({}));
+        if (errors.length < 10) errors.push({ shopId: update.shopId, error: errData.error || "Unknown" });
+      }
+    } catch (error) {
+      pushErrors++;
+      if (errors.length < 10) errors.push({ shopId: update.shopId, error: error.message });
+    }
+
+    // Throttle: 180ms between requests (under 5/sec PUT limit)
+    await new Promise((r) => setTimeout(r, 180));
+  }
+
+  return NextResponse.json({
+    ...results,
+    pushed,
+    pushErrors,
+    errors: errors.length > 0 ? errors : undefined,
+  });
+}

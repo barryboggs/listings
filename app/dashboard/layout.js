@@ -10,6 +10,7 @@ export function useUser() {
 
 const NAV_ITEMS = [
   { href: "/dashboard", icon: "◉", label: "Locations" },
+  { href: "/dashboard/holiday-import", icon: "📅", label: "Holiday Import" },
   { href: "/dashboard/activity", icon: "◷", label: "Activity Log" },
   { href: "/dashboard/api-status", icon: "⟡", label: "API Status" },
 ];
