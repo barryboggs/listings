@@ -7,6 +7,7 @@ import {
   detectBrand,
 } from "@/lib/semrush";
 import { LOCATIONS as DEMO_LOCATIONS, getBrandConfig } from "@/lib/data";
+import { getShopNumberMap } from "@/lib/db";
 
 export async function GET(request) {
   const token = request.cookies.get("auth-token")?.value;
@@ -18,12 +19,19 @@ export async function GET(request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Load shop number mappings
+  let shopMap = { bySemrushId: new Map(), byShopId: new Map(), all: [] };
+  try {
+    shopMap = await getShopNumberMap();
+  } catch {}
+
   const { hasToken } = getTokenStatus();
 
   if (!hasToken) {
     const filtered = DEMO_LOCATIONS.filter((loc) =>
       user.brands.includes("*") || user.brands.includes(loc.brand)
     );
+    mergeShopNumbers(filtered, shopMap);
     const brands = deriveBrands(filtered);
     return NextResponse.json({
       locations: filtered,
@@ -42,7 +50,8 @@ export async function GET(request) {
       return transformed;
     });
 
-    // Admin users (brands: ["*"]) see everything, others are filtered
+    mergeShopNumbers(locations, shopMap);
+
     const hasAllAccess = user.brands.includes("*");
     const filtered = hasAllAccess
       ? locations
@@ -62,6 +71,7 @@ export async function GET(request) {
     const filtered = DEMO_LOCATIONS.filter((loc) =>
       user.brands.includes("*") || user.brands.includes(loc.brand)
     );
+    mergeShopNumbers(filtered, shopMap);
     const brands = deriveBrands(filtered);
     return NextResponse.json({
       locations: filtered,
@@ -70,6 +80,55 @@ export async function GET(request) {
       error: error.message,
       message: "Semrush API error — falling back to demo data",
     });
+  }
+}
+
+/**
+ * Merge shop numbers into location data.
+ * Primary: match by semrush_location_id in the database.
+ * Fallback: check if the shop ID appears in the location's website URL.
+ * Fallback 2: match by normalized phone number.
+ */
+function mergeShopNumbers(locations, shopMap) {
+  // Build a reverse lookup: all shop records indexed by shop_id
+  const allShops = shopMap.all || [];
+
+  for (const loc of locations) {
+    // Primary: already matched in database
+    const shop = shopMap.bySemrushId.get(loc.id);
+    if (shop) {
+      loc.shopId = shop.shop_id;
+      continue;
+    }
+
+    // Fallback: check if any shop ID appears in this location's URL
+    const url = (loc.websiteRaw || loc.website || "").toLowerCase();
+    if (url) {
+      let found = false;
+      for (const s of allShops) {
+        if (s.shop_id && url.includes(s.shop_id.toLowerCase())) {
+          loc.shopId = s.shop_id;
+          found = true;
+          break;
+        }
+      }
+      if (found) continue;
+    }
+
+    // Fallback 2: phone number match
+    const locPhone = (loc.phone || "").replace(/[^0-9]/g, "").slice(-10);
+    if (locPhone.length >= 10) {
+      for (const s of allShops) {
+        const shopPhone = (s.phone || "").replace(/[^0-9]/g, "").slice(-10);
+        if (shopPhone.length >= 10 && shopPhone === locPhone) {
+          loc.shopId = s.shop_id;
+          break;
+        }
+      }
+      if (loc.shopId) continue;
+    }
+
+    loc.shopId = null;
   }
 }
 
