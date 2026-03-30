@@ -81,7 +81,8 @@ export default function LocationsPage() {
           loc.name.toLowerCase().includes(search.toLowerCase()) ||
           loc.city.toLowerCase().includes(search.toLowerCase()) ||
           loc.state.toLowerCase().includes(search.toLowerCase()) ||
-          loc.zip.includes(search))
+          loc.zip.includes(search) ||
+          (loc.shopId && loc.shopId.toString().includes(search)))
     );
   }, [activeBrands, search, locations]);
 
@@ -229,7 +230,7 @@ export default function LocationsPage() {
           })}
         </div>
         <input
-          placeholder="Search by name, city, state, or ZIP..."
+          placeholder="Search by shop #, name, city, state, or ZIP..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="px-3.5 py-2 rounded-md text-xs w-64"
@@ -258,12 +259,12 @@ export default function LocationsPage() {
         <div
           className="hidden lg:grid items-center px-4 py-2.5"
           style={{
-            gridTemplateColumns: "4px 1.3fr 0.9fr 0.6fr 0.5fr 0.5fr 0.5fr 30px 72px",
+            gridTemplateColumns: "4px 0.5fr 1.2fr 0.8fr 0.55fr 0.45fr 0.45fr 0.45fr 30px 72px",
             borderBottom: "1px solid #1e1e22",
           }}
         >
           <span />
-          {["Location", "Address", "Phone", "Status", "Hours", "Updated", "", ""].map((h, i) => (
+          {["Shop #", "Location", "Address", "Phone", "Status", "Hours", "Updated", "", ""].map((h, i) => (
             <span key={i} className="text-[10px] font-bold tracking-widest uppercase" style={{ color: "#555" }}>
               {h}
             </span>
@@ -286,9 +287,12 @@ export default function LocationsPage() {
               {/* Desktop row */}
               <div
                 className="hidden lg:grid items-center px-4 py-3"
-                style={{ gridTemplateColumns: "4px 1.3fr 0.9fr 0.6fr 0.5fr 0.5fr 0.5fr 30px 72px" }}
+                style={{ gridTemplateColumns: "4px 0.5fr 1.2fr 0.8fr 0.55fr 0.45fr 0.45fr 0.45fr 30px 72px" }}
               >
                 <span className="w-[3px] h-7 rounded" style={{ background: brandColor }} />
+                <span className="text-xs font-mono font-semibold" style={{ color: loc.shopId ? "#93c5fd" : "#333" }}>
+                  {loc.shopId || "—"}
+                </span>
                 <span className="text-sm font-semibold text-white truncate pr-2">{loc.name}</span>
                 <span className="text-xs truncate" style={{ color: "#888" }}>{loc.city}, {loc.state} {loc.zip}</span>
                 <span className="text-xs font-mono" style={{ color: "#aaa" }}>{loc.phone}</span>
@@ -311,6 +315,7 @@ export default function LocationsPage() {
               <div className="lg:hidden p-4 space-y-1.5">
                 <div className="flex items-center gap-2">
                   <span className="w-[3px] h-5 rounded" style={{ background: brandColor }} />
+                  {loc.shopId && <span className="text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded" style={{ background: "#0c1a2e", color: "#93c5fd" }}>#{loc.shopId}</span>}
                   <span className="text-sm font-semibold text-white">{loc.name}</span>
                   {errorCount > 0 && (
                     <span className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold ml-auto" style={{ background: "#2d0a0a", color: "#f87171", border: "1px solid #5c1a1a" }}>

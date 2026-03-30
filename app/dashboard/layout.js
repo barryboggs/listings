@@ -16,6 +16,7 @@ const NAV_ITEMS = [
 
 const ADMIN_NAV = [
   { href: "/dashboard/admin", icon: "⚙", label: "User Management" },
+  { href: "/dashboard/shops", icon: "#", label: "Shop Numbers" },
 ];
 
 export default function DashboardLayout({ children }) {
