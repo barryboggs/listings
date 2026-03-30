@@ -16,6 +16,7 @@ export default function ShopsPage() {
   const [importResult, setImportResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [filter, setFilter] = useState("all"); // all, matched, unmatched
+  const [brandFilter, setBrandFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
 
   const showToast = (msg, isError) => {
@@ -124,6 +125,7 @@ export default function ShopsPage() {
 
   // Filter and search
   const filteredShops = shops.filter((s) => {
+    if (brandFilter !== "all" && s.brand !== brandFilter) return false;
     if (filter === "matched" && !s.semrush_location_id) return false;
     if (filter === "unmatched" && s.semrush_location_id) return false;
     if (searchTerm) {
@@ -190,14 +192,21 @@ export default function ShopsPage() {
         </div>
       </div>
 
-      {/* Stats cards */}
+      {/* Stats cards — reflect brand filter when active */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-        {[
-          { label: "Total Shops", value: stats.total, color: "#e8e8e8" },
-          { label: "Matched", value: stats.matched, color: "#34d399" },
-          { label: "Unmatched", value: stats.unmatched, color: "#fbbf24" },
-          { label: "Match Rate", value: stats.total > 0 ? `${Math.round((stats.matched / stats.total) * 100)}%` : "—", color: "#93c5fd" },
-        ].map((stat) => (
+        {(() => {
+          const filteredForStats = brandFilter === "all" ? shops : shops.filter((s) => s.brand === brandFilter);
+          const fTotal = filteredForStats.length;
+          const fMatched = filteredForStats.filter((s) => s.semrush_location_id).length;
+          const fUnmatched = fTotal - fMatched;
+          const brandLabel = brandFilter !== "all" ? ` (${getBrandConfig(brandFilter).name})` : "";
+          return [
+            { label: `Total Shops${brandLabel}`, value: fTotal, color: "#e8e8e8" },
+            { label: "Matched", value: fMatched, color: "#34d399" },
+            { label: "Unmatched", value: fUnmatched, color: fUnmatched > 0 ? "#fbbf24" : "#34d399" },
+            { label: "Match Rate", value: fTotal > 0 ? `${Math.round((fMatched / fTotal) * 100)}%` : "—", color: "#93c5fd" },
+          ];
+        })().map((stat) => (
           <div key={stat.label} className="px-4 py-3 rounded-lg" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
             <div className="text-[11px] font-semibold" style={{ color: "#888" }}>{stat.label}</div>
             <div className="text-2xl font-bold mt-0.5" style={{ color: stat.color }}>{stat.value}</div>
@@ -282,23 +291,41 @@ export default function ShopsPage() {
         </div>
       )}
 
-      {/* Brand summary */}
+      {/* Brand summary — click to filter */}
       {Object.keys(brandSummary).length > 0 && (
         <div className="rounded-xl p-4 mb-5" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
-          <h4 className="text-xs font-bold uppercase tracking-wider mb-3" style={{ color: "#aaa" }}>By Brand</h4>
+          <div className="flex justify-between items-center mb-3">
+            <h4 className="text-xs font-bold uppercase tracking-wider" style={{ color: "#aaa" }}>By Brand</h4>
+            {brandFilter !== "all" && (
+              <button onClick={() => setBrandFilter("all")} className="text-[10px] font-semibold px-2 py-0.5 rounded" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa" }}>
+                Show All Brands
+              </button>
+            )}
+          </div>
           <div className="flex flex-wrap gap-2">
             {Object.entries(brandSummary)
               .sort((a, b) => b[1].total - a[1].total)
               .map(([brandId, data]) => {
                 const config = getBrandConfig(brandId);
                 const pct = data.total > 0 ? Math.round((data.matched / data.total) * 100) : 0;
+                const isActive = brandFilter === brandId;
                 return (
-                  <div key={brandId} className="px-3 py-2 rounded-lg" style={{ background: config.color + "10", border: `1px solid ${config.color}30` }}>
+                  <button
+                    key={brandId}
+                    onClick={() => setBrandFilter(isActive ? "all" : brandId)}
+                    className="px-3 py-2 rounded-lg text-left transition-all"
+                    style={{
+                      background: isActive ? config.color + "25" : config.color + "10",
+                      border: `1.5px solid ${isActive ? config.color : config.color + "30"}`,
+                      outline: isActive ? `2px solid ${config.color}40` : "none",
+                      outlineOffset: "1px",
+                    }}
+                  >
                     <div className="text-xs font-semibold" style={{ color: config.color }}>{config.name}</div>
-                    <div className="text-[10px] mt-0.5" style={{ color: "#888" }}>
+                    <div className="text-[10px] mt-0.5" style={{ color: isActive ? "#bbb" : "#888" }}>
                       {data.matched}/{data.total} matched ({pct}%)
                     </div>
-                  </div>
+                  </button>
                 );
               })}
           </div>
