@@ -116,32 +116,7 @@ export default function LoginPage() {
           </form>
         </div>
 
-        {/* Demo credentials */}
-        <div
-          className="mt-5 rounded-lg p-4"
-          style={{ background: "#1a1a1d", border: "1px solid #222" }}
-        >
-          <p className="text-xs font-semibold mb-2 uppercase tracking-wider" style={{ color: "#666" }}>
-            Demo Accounts
-          </p>
-          <div className="space-y-1.5 font-mono text-xs" style={{ color: "#888" }}>
-            <div className="flex justify-between">
-              <span>admin@drivenbrands.com</span>
-              <span style={{ color: "#555" }}>admin123</span>
-            </div>
-            <div className="flex justify-between">
-              <span>barry@drivenbrands.com</span>
-              <span style={{ color: "#555" }}>demo123</span>
-            </div>
-            <div className="flex justify-between">
-              <span>maria@drivenbrands.com</span>
-              <span style={{ color: "#555" }}>demo123</span>
-            </div>
-          </div>
-          <p className="text-xs mt-3" style={{ color: "#555" }}>
-            Admin account has full access including user management.
-          </p>
-        </div>
+        
       </div>
     </div>
   );
