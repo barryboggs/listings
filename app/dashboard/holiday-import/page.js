@@ -241,7 +241,7 @@ export default function HolidayImportPage() {
             <div>
               <div className="text-sm font-semibold text-white">Ready to push {preview.updates?.length || 0} holiday hour updates</div>
               <p className="text-[10px] mt-0.5" style={{ color: "#666" }}>
-                This will update each matched location via the Semrush API. Rate limited to ~5 req/sec. Estimated time: ~{Math.ceil((preview.updates?.length || 0) * 0.2 / 60)} minutes.
+                This will push to Semrush in batches of 50 locations. Rate limit: 5 bulk requests per minute (12s between batches). Estimated time: ~{Math.ceil(Math.ceil((preview.updates?.length || 0) / 50) * 12 / 60)} minutes for {Math.ceil((preview.updates?.length || 0) / 50)} batches.
               </p>
             </div>
             <button
@@ -263,8 +263,8 @@ export default function HolidayImportPage() {
             {[
               { label: "Pushed Successfully", value: pushResult.pushed, color: "#34d399" },
               { label: "Push Errors", value: pushResult.pushErrors, color: pushResult.pushErrors > 0 ? "#f87171" : "#34d399" },
-              { label: "Matched Locations", value: pushResult.matched, color: "#93c5fd" },
-              { label: "Unmatched", value: pushResult.unmatched, color: "#fbbf24" },
+              { label: "Batches Sent", value: pushResult.batches || "—", color: "#93c5fd" },
+              { label: "Unmatched", value: pushResult.unmatched, color: pushResult.unmatched > 0 ? "#fbbf24" : "#34d399" },
             ].map((stat) => (
               <div key={stat.label} className="px-4 py-3 rounded-lg" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
                 <div className="text-[11px] font-semibold" style={{ color: "#888" }}>{stat.label}</div>

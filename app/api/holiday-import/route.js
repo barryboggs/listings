@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
+import { bulkUpdateLocations, toSemrushFormat } from "@/lib/semrush";
 
 /**
  * Parse time strings like "9:00:00 AM", "5:00:00 PM", "12:00:00 PM" into "HH:mm" (24h)
@@ -193,6 +194,8 @@ export async function POST(request) {
         shopId,
         city: loc.city,
         state: loc.state,
+        address: loc.address,
+        phone: loc.phone,
         holidayHours,
       });
     }
@@ -207,50 +210,67 @@ export async function POST(request) {
     });
   }
 
-  // Push updates to Semrush via the single-location update endpoint
-  // We batch through our own API to respect rate limits
+  // Push updates to Semrush directly using bulk update endpoint
+  // Bulk update: max 50 locations per request, 5 requests per MINUTE
   let pushed = 0;
   let pushErrors = 0;
   const errors = [];
 
-  for (const update of results.updates) {
-    try {
-      const res = await fetch(new URL(`/api/semrush/locations/${update.locationId}`, request.url), {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Cookie: request.headers.get("cookie") || "",
-        },
-        body: JSON.stringify({
-          id: update.locationId,
-          holidayHours: update.holidayHours,
-          // Required fields — pass existing values
-          name: update.locationName,
-          city: update.city,
-          state: update.state,
-        }),
-      });
+  // Build Semrush payloads with required fields
+  const semrushPayloads = results.updates.map((update) => ({
+    id: update.locationId,
+    locationName: update.locationName,
+    city: update.city,
+    region: update.state,
+    address: update.address,
+    phone: update.phone,
+    holidayHours: update.holidayHours,
+  }));
 
-      if (res.ok) {
-        pushed++;
+  // Chunk into batches of 50
+  const chunks = [];
+  for (let i = 0; i < semrushPayloads.length; i += 50) {
+    chunks.push(semrushPayloads.slice(i, i + 50));
+  }
+
+  for (let c = 0; c < chunks.length; c++) {
+    try {
+      const batchResults = await bulkUpdateLocations(chunks[c]);
+
+      // batchResults: [{ locationId, state: "UPDATED"|"FAILED", error? }]
+      if (Array.isArray(batchResults)) {
+        for (const r of batchResults) {
+          if (r.state === "UPDATED") {
+            pushed++;
+          } else {
+            pushErrors++;
+            if (errors.length < 20) {
+              const shopId = results.updates.find((u) => u.locationId === r.locationId)?.shopId || r.locationId;
+              errors.push({ shopId, error: r.error?.message || r.state || "Unknown" });
+            }
+          }
+        }
       } else {
-        pushErrors++;
-        const errData = await res.json().catch(() => ({}));
-        if (errors.length < 10) errors.push({ shopId: update.shopId, error: errData.error || "Unknown" });
+        // If response isn't an array, count the whole batch as pushed (legacy format)
+        pushed += chunks[c].length;
       }
     } catch (error) {
-      pushErrors++;
-      if (errors.length < 10) errors.push({ shopId: update.shopId, error: error.message });
+      // Entire batch failed
+      pushErrors += chunks[c].length;
+      if (errors.length < 20) errors.push({ shopId: `batch-${c + 1}`, error: error.message });
     }
 
-    // Throttle: 180ms between requests (under 5/sec PUT limit)
-    await new Promise((r) => setTimeout(r, 180));
+    // Wait 12 seconds between batches (5 req/min = 1 every 12s)
+    if (c < chunks.length - 1) {
+      await new Promise((r) => setTimeout(r, 12000));
+    }
   }
 
   return NextResponse.json({
     ...results,
     pushed,
     pushErrors,
+    batches: chunks.length,
     errors: errors.length > 0 ? errors : undefined,
   });
 }
