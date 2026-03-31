@@ -18,6 +18,8 @@ export default function ShopsPage() {
   const [filter, setFilter] = useState("all"); // all, matched, unmatched
   const [brandFilter, setBrandFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
 
   const showToast = (msg, isError) => {
     setToast({ msg, isError });
@@ -335,18 +337,18 @@ export default function ShopsPage() {
       {/* Shop numbers list */}
       {stats.total > 0 && (
         <>
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
             <input
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }}
               placeholder="Search by shop ID, address, city, brand..."
-              className="flex-1 px-3 py-2 rounded-md text-xs"
+              className="flex-1 min-w-[200px] px-3 py-2 rounded-md text-xs"
               style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
             />
             {["all", "matched", "unmatched"].map((f) => (
               <button
                 key={f}
-                onClick={() => setFilter(f)}
+                onClick={() => { setFilter(f); setPage(1); }}
                 className="px-3 py-2 rounded-md text-[11px] font-semibold capitalize"
                 style={{
                   background: filter === f ? "#1c1c1f" : "transparent",
@@ -359,45 +361,134 @@ export default function ShopsPage() {
             ))}
           </div>
 
-          <div className="rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
-            {/* Header */}
-            <div className="hidden sm:grid items-center px-4 py-2.5" style={{ gridTemplateColumns: "80px 100px 1.2fr 0.8fr 0.6fr 0.6fr 60px", borderBottom: "1px solid #1e1e22" }}>
-              {["Shop ID", "Brand", "Address", "City, State", "Phone", "Website", "Status"].map((h) => (
-                <span key={h} className="text-[10px] font-bold tracking-widest uppercase" style={{ color: "#555" }}>{h}</span>
-              ))}
-            </div>
+          {/* Pagination controls — top */}
+          {(() => {
+            const totalPages = Math.ceil(filteredShops.length / pageSize);
+            const startIdx = (page - 1) * pageSize;
+            const endIdx = Math.min(startIdx + pageSize, filteredShops.length);
+            const pagedShops = filteredShops.slice(startIdx, endIdx);
 
-            {/* Rows */}
-            {filteredShops.slice(0, 100).map((shop, i) => {
-              const config = getBrandConfig(shop.brand);
-              const isMatched = !!shop.semrush_location_id;
-              return (
-                <div key={shop.shop_id} className="hidden sm:grid items-center px-4 py-2.5" style={{ gridTemplateColumns: "80px 100px 1.2fr 0.8fr 0.6fr 0.6fr 60px", borderBottom: i < filteredShops.length - 1 ? "1px solid #1a1a1d" : "none", background: i % 2 === 0 ? "#151517" : "#131315" }}>
-                  <span className="text-xs font-mono font-semibold" style={{ color: "#93c5fd" }}>{shop.shop_id}</span>
-                  <span className="text-[10px] font-semibold truncate" style={{ color: config.color }}>{config.name}</span>
-                  <span className="text-xs truncate" style={{ color: "#888" }}>{shop.street_address}{shop.address2 ? `, ${shop.address2}` : ""}</span>
-                  <span className="text-xs truncate" style={{ color: "#888" }}>{shop.city}, {shop.state}</span>
-                  <span className="text-[11px] font-mono" style={{ color: "#777" }}>{shop.phone || "—"}</span>
-                  <span className="text-[10px] truncate" style={{ color: "#555" }}>{shop.website ? "✓" : "—"}</span>
-                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded text-center" style={{ background: isMatched ? "#0d281820" : "#2d1b0020", color: isMatched ? "#34d399" : "#fbbf24" }}>
-                    {isMatched ? "Linked" : "—"}
+            return (
+              <>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11px]" style={{ color: "#666" }}>
+                    Showing {filteredShops.length > 0 ? startIdx + 1 : 0}–{endIdx} of {filteredShops.length} shops
                   </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px]" style={{ color: "#555" }}>Per page:</span>
+                    {[50, 100, 500].map((size) => (
+                      <button
+                        key={size}
+                        onClick={() => { setPageSize(size); setPage(1); }}
+                        className="px-2 py-1 rounded text-[11px] font-semibold"
+                        style={{
+                          background: pageSize === size ? "#1c1c1f" : "transparent",
+                          border: `1px solid ${pageSize === size ? "#2a2a2e" : "transparent"}`,
+                          color: pageSize === size ? "#ddd" : "#666",
+                        }}
+                      >
+                        {size}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              );
-            })}
 
-            {filteredShops.length > 100 && (
-              <div className="py-3 text-center text-[11px]" style={{ color: "#555" }}>
-                Showing first 100 of {filteredShops.length} results
-              </div>
-            )}
+                <div className="rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+                  {/* Header */}
+                  <div className="hidden sm:grid items-center px-4 py-2.5" style={{ gridTemplateColumns: "80px 100px 1.2fr 0.8fr 0.6fr 0.6fr 60px", borderBottom: "1px solid #1e1e22" }}>
+                    {["Shop ID", "Brand", "Address", "City, State", "Phone", "Website", "Status"].map((h) => (
+                      <span key={h} className="text-[10px] font-bold tracking-widest uppercase" style={{ color: "#555" }}>{h}</span>
+                    ))}
+                  </div>
 
-            {filteredShops.length === 0 && (
-              <div className="py-8 text-center text-sm" style={{ color: "#555" }}>
-                No shop numbers match your search
-              </div>
-            )}
-          </div>
+                  {/* Rows */}
+                  {pagedShops.map((shop, i) => {
+                    const config = getBrandConfig(shop.brand);
+                    const isMatched = !!shop.semrush_location_id;
+                    return (
+                      <div key={shop.shop_id} className="hidden sm:grid items-center px-4 py-2.5" style={{ gridTemplateColumns: "80px 100px 1.2fr 0.8fr 0.6fr 0.6fr 60px", borderBottom: i < pagedShops.length - 1 ? "1px solid #1a1a1d" : "none", background: i % 2 === 0 ? "#151517" : "#131315" }}>
+                        <span className="text-xs font-mono font-semibold" style={{ color: "#93c5fd" }}>{shop.shop_id}</span>
+                        <span className="text-[10px] font-semibold truncate" style={{ color: config.color }}>{config.name}</span>
+                        <span className="text-xs truncate" style={{ color: "#888" }}>{shop.street_address}{shop.address2 ? `, ${shop.address2}` : ""}</span>
+                        <span className="text-xs truncate" style={{ color: "#888" }}>{shop.city}, {shop.state}</span>
+                        <span className="text-[11px] font-mono" style={{ color: "#777" }}>{shop.phone || "—"}</span>
+                        <span className="text-[10px] truncate" style={{ color: "#555" }}>{shop.website ? "✓" : "—"}</span>
+                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded text-center" style={{ background: isMatched ? "#0d281820" : "#2d1b0020", color: isMatched ? "#34d399" : "#fbbf24" }}>
+                          {isMatched ? "Linked" : "—"}
+                        </span>
+                      </div>
+                    );
+                  })}
+
+                  {filteredShops.length === 0 && (
+                    <div className="py-8 text-center text-sm" style={{ color: "#555" }}>
+                      No shop numbers match your search
+                    </div>
+                  )}
+                </div>
+
+                {/* Pagination controls — bottom */}
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-between mt-3">
+                    <button
+                      onClick={() => setPage(Math.max(1, page - 1))}
+                      disabled={page === 1}
+                      className="px-3 py-1.5 rounded-md text-xs font-semibold"
+                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: page === 1 ? "#444" : "#aaa", opacity: page === 1 ? 0.5 : 1 }}
+                    >
+                      ← Previous
+                    </button>
+
+                    <div className="flex items-center gap-1">
+                      {(() => {
+                        // Show page numbers with ellipsis for large page counts
+                        const pages = [];
+                        const maxVisible = 7;
+
+                        if (totalPages <= maxVisible) {
+                          for (let p = 1; p <= totalPages; p++) pages.push(p);
+                        } else {
+                          pages.push(1);
+                          if (page > 3) pages.push("...");
+                          for (let p = Math.max(2, page - 1); p <= Math.min(totalPages - 1, page + 1); p++) pages.push(p);
+                          if (page < totalPages - 2) pages.push("...");
+                          pages.push(totalPages);
+                        }
+
+                        return pages.map((p, idx) =>
+                          p === "..." ? (
+                            <span key={`ellipsis-${idx}`} className="px-1 text-xs" style={{ color: "#555" }}>…</span>
+                          ) : (
+                            <button
+                              key={p}
+                              onClick={() => setPage(p)}
+                              className="w-8 h-8 rounded text-xs font-semibold"
+                              style={{
+                                background: page === p ? "#93c5fd20" : "transparent",
+                                border: `1px solid ${page === p ? "#93c5fd40" : "transparent"}`,
+                                color: page === p ? "#93c5fd" : "#888",
+                              }}
+                            >
+                              {p}
+                            </button>
+                          )
+                        );
+                      })()}
+                    </div>
+
+                    <button
+                      onClick={() => setPage(Math.min(totalPages, page + 1))}
+                      disabled={page === totalPages}
+                      className="px-3 py-1.5 rounded-md text-xs font-semibold"
+                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: page === totalPages ? "#444" : "#aaa", opacity: page === totalPages ? 0.5 : 1 }}
+                    >
+                      Next →
+                    </button>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </>
       )}
 
