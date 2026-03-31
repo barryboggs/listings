@@ -216,16 +216,19 @@ export async function POST(request) {
   let pushErrors = 0;
   const errors = [];
 
-  // Build Semrush payloads with required fields
-  const semrushPayloads = results.updates.map((update) => ({
-    id: update.locationId,
-    locationName: update.locationName,
-    city: update.city,
-    region: update.state,
-    address: update.address,
-    phone: update.phone,
-    holidayHours: update.holidayHours,
-  }));
+  // Build Semrush payloads using toSemrushFormat for proper field mapping
+  const semrushPayloads = results.updates.map((update) => {
+    const payload = toSemrushFormat({
+      name: update.locationName,
+      city: update.city,
+      state: update.state,
+      address: update.address,
+      phone: update.phone,
+      holidayHours: update.holidayHours,
+    });
+    payload.id = update.locationId;
+    return payload;
+  });
 
   // Chunk into batches of 50
   const chunks = [];
@@ -265,6 +268,18 @@ export async function POST(request) {
       await new Promise((r) => setTimeout(r, 12000));
     }
   }
+
+  // Log activity
+  try {
+    const { logActivity } = await import("@/lib/db");
+    await logActivity({
+      user: user.name,
+      action: "Holiday hours import",
+      location: `${pushed} locations updated, ${pushErrors} errors`,
+      brand: "multi-brand",
+      details: `${chunks.length} batches sent to Semrush. ${results.closed} closed, ${results.specialHours} special hours.`,
+    });
+  } catch {}
 
   return NextResponse.json({
     ...results,
