@@ -196,6 +196,7 @@ export async function POST(request) {
         state: loc.state,
         address: loc.address,
         phone: loc.phone,
+        businessHours: loc.businessHours,
         holidayHours,
       });
     }
@@ -224,6 +225,7 @@ export async function POST(request) {
       state: update.state,
       address: update.address,
       phone: update.phone,
+      businessHours: update.businessHours,
       holidayHours: update.holidayHours,
     });
     payload.id = update.locationId;
