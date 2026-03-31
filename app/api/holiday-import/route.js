@@ -190,13 +190,9 @@ export async function POST(request) {
     if (holidayHours.length > 0) {
       results.updates.push({
         locationId: loc.id,
-        locationName: loc.name,
         shopId,
-        city: loc.city,
-        state: loc.state,
-        address: loc.address,
-        phone: loc.phone,
-        businessHours: loc.businessHours,
+        // Store the full location so we can pass all fields to Semrush
+        loc,
         holidayHours,
       });
     }
@@ -207,7 +203,14 @@ export async function POST(request) {
     return NextResponse.json({
       ...results,
       dryRun: true,
-      preview: results.updates.slice(0, 20),
+      preview: results.updates.slice(0, 20).map((u) => ({
+        shopId: u.shopId,
+        locationId: u.locationId,
+        locationName: u.loc.name,
+        city: u.loc.city,
+        state: u.loc.state,
+        holidayHours: u.holidayHours,
+      })),
     });
   }
 
@@ -218,15 +221,22 @@ export async function POST(request) {
   const errors = [];
 
   // Build Semrush payloads using toSemrushFormat for proper field mapping
+  // Pass the full location data so Semrush gets all fields it validates
   const semrushPayloads = results.updates.map((update) => {
+    const loc = update.loc;
     const payload = toSemrushFormat({
-      name: update.locationName,
-      city: update.city,
-      state: update.state,
-      address: update.address,
-      phone: update.phone,
-      businessHours: update.businessHours,
-      holidayHours: update.holidayHours,
+      name: loc.name,
+      address: loc.address,
+      additionalAddressInfo: loc.additionalAddressInfo,
+      city: loc.city,
+      state: loc.state,
+      zip: loc.zip,
+      phone: loc.phone,
+      website: loc.website,
+      urlParams: loc.urlParams,
+      businessHours: loc.businessHours,
+      holidayHours: update.holidayHours, // Override with the new holiday hours from CSV
+      reopenDate: loc.reopenDate,
     });
     payload.id = update.locationId;
     return payload;
