@@ -62,20 +62,30 @@ export async function POST(request) {
           pushed++;
         } else {
           pushErrors++;
-          if (errors.length < 10) {
-            errors.push({
-              locationId: r.locationId,
-              error: r.error?.message || r.state || "Unknown",
-            });
-          }
+          // Find the shop ID for this location
+          const update = updates.find((u) => u.loc.id === r.locationId);
+          errors.push({
+            locationId: r.locationId,
+            shopId: update?.shopId || "unknown",
+            locationName: update?.loc?.name || "",
+            error: r.error?.message || r.state || "Unknown",
+          });
         }
       }
     } else {
       pushed = semrushPayloads.length;
     }
   } catch (error) {
+    // Entire batch failed — report all locations in this batch
     pushErrors = semrushPayloads.length;
-    errors.push({ locationId: "batch", error: error.message });
+    for (const update of updates) {
+      errors.push({
+        locationId: update.loc.id,
+        shopId: update.shopId || "unknown",
+        locationName: update.loc?.name || "",
+        error: error.message,
+      });
+    }
   }
 
   return NextResponse.json({ pushed, pushErrors, errors: errors.length > 0 ? errors : undefined });

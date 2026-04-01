@@ -313,12 +313,45 @@ export default function HolidayImportPage() {
 
           {pushResult.errors && pushResult.errors.length > 0 && (
             <div className="rounded-xl p-4" style={{ background: "#2d0a0a20", border: "1px solid #5c1a1a40" }}>
-              <h4 className="text-xs font-bold mb-2" style={{ color: "#f87171" }}>Errors (first 20)</h4>
-              {pushResult.errors.map((err, i) => (
-                <div key={i} className="text-[11px] py-1" style={{ color: "#888" }}>
-                  <span className="font-mono" style={{ color: "#93c5fd" }}>{err.locationId}</span>: {err.error}
+              <div className="flex justify-between items-center mb-3">
+                <h4 className="text-xs font-bold" style={{ color: "#f87171" }}>
+                  {pushResult.errors.length} Failed Updates
+                </h4>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      const csv = "Shop ID,Location Name,Error\n" +
+                        pushResult.errors.map((e) => `${e.shopId},"${e.locationName || ""}","${e.error}"`).join("\n");
+                      navigator.clipboard.writeText(csv);
+                      showToast("Error list copied to clipboard as CSV");
+                    }}
+                    className="px-2.5 py-1 rounded text-[10px] font-semibold"
+                    style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa" }}
+                  >
+                    Copy as CSV
+                  </button>
+                  <button
+                    onClick={() => {
+                      const ids = pushResult.errors.map((e) => e.shopId).join(", ");
+                      navigator.clipboard.writeText(ids);
+                      showToast("Shop IDs copied to clipboard");
+                    }}
+                    className="px-2.5 py-1 rounded text-[10px] font-semibold"
+                    style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa" }}
+                  >
+                    Copy Shop IDs
+                  </button>
                 </div>
-              ))}
+              </div>
+              <div className="max-h-64 overflow-y-auto space-y-0.5">
+                {pushResult.errors.map((err, i) => (
+                  <div key={i} className="text-[11px] py-1 flex items-start gap-3" style={{ borderBottom: i < pushResult.errors.length - 1 ? "1px solid #5c1a1a15" : "none" }}>
+                    <span className="font-mono font-semibold flex-shrink-0 w-16" style={{ color: "#93c5fd" }}>#{err.shopId}</span>
+                    <span className="flex-1 truncate" style={{ color: "#999" }}>{err.locationName}</span>
+                    <span style={{ color: "#f87171" }}>{err.error}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
