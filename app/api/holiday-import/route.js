@@ -222,7 +222,12 @@ export async function POST(request) {
 
   // Build Semrush payloads using toSemrushFormat for proper field mapping
   // Pass the full location data so Semrush gets all fields it validates
-  const semrushPayloads = results.updates.map((update) => {
+  const payloadMap = new Map(); // Deduplicate by location ID
+
+  for (const update of results.updates) {
+    // Skip if we already have this location (duplicate CSV rows)
+    if (payloadMap.has(update.locationId)) continue;
+
     const loc = update.loc;
     const payload = toSemrushFormat({
       name: loc.name,
@@ -235,12 +240,15 @@ export async function POST(request) {
       website: loc.website,
       urlParams: loc.urlParams,
       businessHours: loc.businessHours,
-      holidayHours: update.holidayHours, // Override with the new holiday hours from CSV
+      holidayHours: update.holidayHours,
       reopenDate: loc.reopenDate,
     });
     payload.id = update.locationId;
-    return payload;
-  });
+    payloadMap.set(update.locationId, payload);
+  }
+
+  const semrushPayloads = Array.from(payloadMap.values());
+  const deduped = results.updates.length - semrushPayloads.length;
 
   // Chunk into batches of 50
   const chunks = [];
@@ -249,35 +257,44 @@ export async function POST(request) {
   }
 
   for (let c = 0; c < chunks.length; c++) {
-    try {
-      const batchResults = await bulkUpdateLocations(chunks[c]);
+    let batchSuccess = false;
 
-      // batchResults: [{ locationId, state: "UPDATED"|"FAILED", error? }]
-      if (Array.isArray(batchResults)) {
-        for (const r of batchResults) {
-          if (r.state === "UPDATED") {
-            pushed++;
-          } else {
-            pushErrors++;
-            if (errors.length < 20) {
-              const shopId = results.updates.find((u) => u.locationId === r.locationId)?.shopId || r.locationId;
-              errors.push({ shopId, error: r.error?.message || r.state || "Unknown" });
+    // Try up to 2 attempts per batch (retry once on HTML/rate-limit errors)
+    for (let attempt = 0; attempt < 2 && !batchSuccess; attempt++) {
+      try {
+        const batchResults = await bulkUpdateLocations(chunks[c]);
+
+        if (Array.isArray(batchResults)) {
+          for (const r of batchResults) {
+            if (r.state === "UPDATED") {
+              pushed++;
+            } else {
+              pushErrors++;
+              if (errors.length < 20) {
+                const shopId = results.updates.find((u) => u.locationId === r.locationId)?.shopId || r.locationId;
+                errors.push({ shopId, error: r.error?.message || r.state || "Unknown" });
+              }
             }
           }
+        } else {
+          pushed += chunks[c].length;
         }
-      } else {
-        // If response isn't an array, count the whole batch as pushed (legacy format)
-        pushed += chunks[c].length;
+        batchSuccess = true;
+      } catch (error) {
+        if (attempt === 0 && (error.message.includes("Unexpected token") || error.message.includes("rate limit"))) {
+          // Retry after a longer wait
+          await new Promise((r) => setTimeout(r, 15000));
+          continue;
+        }
+        // Final attempt failed
+        pushErrors += chunks[c].length;
+        if (errors.length < 20) errors.push({ shopId: `batch-${c + 1}`, error: error.message });
       }
-    } catch (error) {
-      // Entire batch failed
-      pushErrors += chunks[c].length;
-      if (errors.length < 20) errors.push({ shopId: `batch-${c + 1}`, error: error.message });
     }
 
-    // Wait 12 seconds between batches (5 req/min = 1 every 12s)
+    // Wait 15 seconds between batches (conservative, avoids rate limits)
     if (c < chunks.length - 1) {
-      await new Promise((r) => setTimeout(r, 12000));
+      await new Promise((r) => setTimeout(r, 15000));
     }
   }
 
@@ -289,7 +306,7 @@ export async function POST(request) {
       action: "Holiday hours import",
       location: `${pushed} locations updated, ${pushErrors} errors`,
       brand: "multi-brand",
-      details: `${chunks.length} batches sent to Semrush. ${results.closed} closed, ${results.specialHours} special hours.`,
+      details: `${chunks.length} batches sent to Semrush. ${results.closed} closed, ${results.specialHours} special hours.${deduped > 0 ? ` ${deduped} duplicate rows skipped.` : ""}`,
     });
   } catch {}
 
@@ -298,6 +315,7 @@ export async function POST(request) {
     pushed,
     pushErrors,
     batches: chunks.length,
+    duplicatesSkipped: deduped,
     errors: errors.length > 0 ? errors : undefined,
   });
 }
