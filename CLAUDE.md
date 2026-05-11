@@ -102,6 +102,21 @@ Important consequences:
 - The rich API is a **supplement** for fields the deprecated API doesn't expose. New code that touches description/categories/coordinates/social goes through `lib/semrush-rich.js`.
 - **Old-API `id` ≠ rich-API `location_id`.** [lib/db.js](lib/db.js) `lm_shop_numbers` carries a `semrush_new_id` column mapping the two. Populated by `POST /api/db/sync-rich-mappings` (admin button on [/dashboard/admin](app/dashboard/admin/page.js)) which matches by website URL → phone → address+city — same logic as the existing shop-number matcher. Re-run any time; idempotent.
 - Use `getNewIdForOldId(oldId)` from [lib/db.js](lib/db.js) when routes need to bridge between APIs. The "Extras" tab in [components/EditModal.js](components/EditModal.js) consumes `GET /api/semrush/rich/[oldId]` — the route resolves the mapping internally and returns `{ rich: {...} }` on hit, or `{ rich: null, reason: "no_mapping" | "no_apikey" }` for warnable states (NOT errors, so the UI can show a friendly banner instead of a 500).
+- `PATCH /api/semrush/rich/[oldId]` accepts `{ changes: { ...camelCase keys... }, locationName?, validateOnly? }` — `toRichUpdate()` in [lib/semrush-rich.js](lib/semrush-rich.js) builds both the snake_case payload and the `update_mask` from the same input keys, so only dirty fields touch upstream. The route logs to activity with `Fields: description, category_ids, ...` so partial saves are traceable.
+
+### Dual-save flow in EditModal
+
+[components/EditModal.js](components/EditModal.js) saves to **two APIs from one click** because core fields live on the deprecated API and rich fields on the new one:
+
+1. Build the rich diff (`richDirtyChanges()` — JSON-equality per key against the initial fetch).
+2. If anything changed AND the rich payload is loaded, fire `PATCH /api/semrush/rich/[id]` first. **If it fails, halt** — show the error inline and keep the modal open. Don't proceed to the core save, because the user needs to see what went wrong and decide.
+3. On rich success (or no rich changes), call `onSave(...)` — parent's [app/dashboard/page.js](app/dashboard/page.js#L106) closes the modal and fires `PUT /api/semrush/locations/[id]` for the core fields.
+
+Why this ordering: parent's `onSave` closes the modal immediately, so if rich save were second the user wouldn't see rich errors. Rich-first means a failed rich save keeps the modal open with the error visible, while a failed core save still surfaces via the parent's toast.
+
+### Categories picker
+
+The picker in EditModal hits `GET /api/semrush/categories` once on mount. That route proxies `getCategories()` in [lib/semrush-rich.js](lib/semrush-rich.js), which caches the catalog in-process for 24h. If the upstream endpoint 404s or errors, the route returns `{ categories: [], reason }` — the picker degrades to a free-text input that accepts raw category IDs. Either way the user can edit categories; only the labels differ.
 - The rich client uses an in-process 24h cache for `getCategories()` — fine for serverless workers, will repopulate per cold start.
 
 Status helpers: `getTokenStatus()` (old API) and `getRichStatus()` (rich API) both return `{ hasToken / hasKey, ... }`. **Neither validates the credential actually works** — see "Misleading badge" below.

@@ -55,10 +55,17 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
 
   // Rich fields (description / categories / coordinates / social) come from
   // the new Semrush API via /api/semrush/rich/[id]. Lazy-fetched on mount.
-  // Phase 2 is read-only — Phase 3 will hook up writes.
-  const [rich, setRich] = useState(null);
+  // Editable in Phase 3 — diff against richInitial for the update_mask.
+  const [rich, setRich] = useState(null);            // current editable values
+  const [richInitial, setRichInitial] = useState(null); // baseline for dirty check
   const [richState, setRichState] = useState("loading"); // loading | ready | unavailable | error
   const [richReason, setRichReason] = useState(null);
+  const [richSaveError, setRichSaveError] = useState(null);
+
+  // Category catalog for the picker. Loaded once on mount; falls back to
+  // raw-ID free-text if the upstream endpoint isn't available.
+  const [categoryCatalog, setCategoryCatalog] = useState(null); // null = loading, [] = unavailable
+  const [categoryQuery, setCategoryQuery] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -80,6 +87,7 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
         }
         if (body.rich) {
           setRich(body.rich);
+          setRichInitial(body.rich);
           setRichState("ready");
         } else {
           setRichState("unavailable");
@@ -96,21 +104,137 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
     };
   }, [location.semrushId, location.id]);
 
+  // Load category catalog for this location's country. Categories differ
+  // between US/CA/etc, so we scope the fetch to the location. Server
+  // caches per-country for 24h so subsequent opens are free.
+  useEffect(() => {
+    let cancelled = false;
+    const country = (location.countryCode || "US").toUpperCase();
+    setCategoryCatalog(null); // reset to loading state when country changes
+    fetch(`/api/semrush/categories?country=${encodeURIComponent(country)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        setCategoryCatalog(Array.isArray(data.categories) ? data.categories : []);
+      })
+      .catch(() => {
+        if (!cancelled) setCategoryCatalog([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [location.countryCode]);
+
+  // Helpers for rich-field editing
+  const updateRich = (key, value) => setRich((prev) => ({ ...prev, [key]: value }));
+
+  // Compute which rich fields changed since load. Returns an object suitable
+  // for the PATCH route's `changes` param (only dirty keys present).
+  const richDirtyChanges = () => {
+    if (!rich || !richInitial) return {};
+    const out = {};
+    const keys = [
+      "description",
+      "categoryIds",
+      "coordinates",
+      "suppressAddress",
+      "featuredMessage",
+      "featuredMessageUrl",
+      "youtubeVideo",
+      "instagramUsername",
+      "twitterUsername",
+    ];
+    for (const k of keys) {
+      // Deep-equal via JSON for object/array fields (coordinates, categoryIds)
+      const a = JSON.stringify(rich[k] ?? null);
+      const b = JSON.stringify(richInitial[k] ?? null);
+      if (a !== b) out[k] = rich[k];
+    }
+    return out;
+  };
+
+  // Resolve a category id → human name from the loaded catalog, falling
+  // back to the raw id when the catalog is empty/unavailable. Prefers
+  // full_name (hierarchical e.g. "Food > Fast Food Restaurant") over name.
+  const categoryLabel = (id) => {
+    if (!categoryCatalog || categoryCatalog.length === 0) return id;
+    const hit = categoryCatalog.find((c) => c.id === id || c.category_id === id);
+    return hit?.full_name || hit?.name || hit?.label || id;
+  };
+
+  // Filter catalog for the picker — search across name, full_name, and id.
+  const filteredCategories =
+    categoryCatalog && categoryQuery
+      ? categoryCatalog
+          .filter((c) => {
+            const text = `${c.full_name || ""} ${c.name || c.label || ""} ${c.id || c.category_id || ""}`.toLowerCase();
+            return text.includes(categoryQuery.toLowerCase());
+          })
+          .slice(0, 10)
+      : [];
+
+  const addCategory = (id) => {
+    if (!id || !rich) return;
+    const current = rich.categoryIds || [];
+    if (current.includes(id)) return;
+    if (current.length >= 10) return; // API limit
+    updateRich("categoryIds", [...current, id]);
+    setCategoryQuery("");
+  };
+
+  const removeCategory = (id) => {
+    if (!rich) return;
+    updateRich("categoryIds", (rich.categoryIds || []).filter((c) => c !== id));
+  };
+
   const hasErrors = (location.semrushErrors || []).length > 0;
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (saving) return;
     setSaving(true);
-    setTimeout(() => {
-      setSaving(false);
-      setSaved(true);
-      setTimeout(() => {
-        onSave({
-          ...formData,
-          businessHours: hours,
-          holidayHours: holidayHours.length > 0 ? holidayHours : undefined,
+    setRichSaveError(null);
+
+    // 1. Rich save first, if anything in the Extras tab changed. We do this
+    //    before calling onSave because onSave closes the modal immediately
+    //    in the parent — if rich save fails we want the modal to stay open
+    //    so the user can see the error and decide what to do.
+    const changes = richDirtyChanges();
+    if (Object.keys(changes).length > 0 && richState === "ready") {
+      const oldId = location.semrushId || location.id;
+      try {
+        const res = await fetch(`/api/semrush/rich/${oldId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ changes, locationName: location.name }),
         });
-      }, 600);
-    }, 1500);
+        const body = await res.json();
+        if (!res.ok) {
+          setRichSaveError(body.error || `Rich save failed (HTTP ${res.status})`);
+          setSaving(false);
+          return; // halt — don't fire core save
+        }
+        if (body.rich) {
+          setRich(body.rich);
+          setRichInitial(body.rich);
+        }
+      } catch (e) {
+        setRichSaveError(`Rich save failed: ${e.message}`);
+        setSaving(false);
+        return;
+      }
+    }
+
+    // 2. Core save — onSave triggers PUT /api/semrush/locations/[id] in
+    //    the parent and closes the modal. Brief "Pushed" state for visual
+    //    continuity with the previous flow.
+    setSaved(true);
+    setTimeout(() => {
+      onSave({
+        ...formData,
+        businessHours: hours,
+        holidayHours: holidayHours.length > 0 ? holidayHours : undefined,
+      });
+    }, 400);
   };
 
   // Holiday hours helpers
@@ -390,108 +514,237 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
 
               {richState === "ready" && rich && (
                 <>
-                  <div className="text-[10px] mb-1" style={{ color: "#555" }}>
-                    Read-only preview. Editing for these fields comes in a later phase.
-                  </div>
+                  {richSaveError && (
+                    <div className="px-3 py-2 rounded-lg text-[11px]" style={{ background: "#2d0a0a", border: "1px solid #5c1a1a", color: "#f87171" }}>
+                      <span className="font-semibold">Rich save failed:</span> {richSaveError}
+                    </div>
+                  )}
 
                   {/* Description */}
-                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
-                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Description</div>
-                    {rich.description ? (
-                      <p className="text-xs leading-relaxed whitespace-pre-wrap" style={{ color: "#ccc" }}>{rich.description}</p>
-                    ) : (
-                      <p className="text-xs italic" style={{ color: "#555" }}>No description set</p>
-                    )}
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                      Description <span style={{ color: "#555" }}>(10–750 chars)</span>
+                    </label>
+                    <textarea
+                      value={rich.description || ""}
+                      onChange={(e) => updateRich("description", e.target.value)}
+                      rows={4}
+                      maxLength={750}
+                      placeholder="Describe this location..."
+                      className="w-full px-3 py-2.5 rounded-md text-xs leading-relaxed"
+                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd", fontFamily: "inherit", resize: "vertical" }}
+                    />
+                    <div className="text-[10px] mt-1 text-right" style={{ color: (rich.description || "").length > 750 ? "#f87171" : "#555" }}>
+                      {(rich.description || "").length} / 750
+                    </div>
                   </div>
 
-                  {/* Categories */}
-                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
-                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>
-                      Categories
-                      {rich.categoryIds?.length > 0 && (
-                        <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold" style={{ background: "#a78bfa20", color: "#a78bfa" }}>
-                          {rich.categoryIds.length}
-                        </span>
+                  {/* Categories picker */}
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                      Categories <span style={{ color: "#555" }}>(primary + up to 9 secondary, max 10)</span>
+                    </label>
+
+                    {/* Currently-selected chips */}
+                    <div className="flex flex-wrap gap-1.5 mb-2 min-h-[24px]">
+                      {(rich.categoryIds || []).length === 0 && (
+                        <span className="text-[11px] italic" style={{ color: "#555" }}>No categories selected</span>
                       )}
+                      {(rich.categoryIds || []).map((cid, idx) => (
+                        <span key={cid} className="inline-flex items-center px-2 py-0.5 rounded text-[11px]" style={{ background: idx === 0 ? "#a78bfa20" : "#151517", border: `1px solid ${idx === 0 ? "#a78bfa" : "#2a2a2e"}`, color: idx === 0 ? "#c4b5fd" : "#aaa" }}>
+                          {idx === 0 && <span className="text-[9px] font-bold uppercase" style={{ marginRight: "6px" }}>Primary</span>}
+                          <span className={categoryCatalog && categoryCatalog.length > 0 ? "" : "font-mono"} style={{ marginRight: "6px" }}>{categoryLabel(cid)}</span>
+                          <button type="button" onClick={() => removeCategory(cid)} className="hover:opacity-100 opacity-70" style={{ color: idx === 0 ? "#c4b5fd" : "#888" }}>×</button>
+                        </span>
+                      ))}
                     </div>
-                    {rich.categoryIds?.length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {rich.categoryIds.map((cid) => (
-                          <span key={cid} className="px-2 py-0.5 rounded text-[11px] font-mono" style={{ background: "#151517", border: "1px solid #2a2a2e", color: "#aaa" }}>
-                            {cid}
-                          </span>
-                        ))}
+
+                    {/* Picker — typeahead if catalog is available, free-form input as fallback */}
+                    {categoryCatalog === null && (
+                      <div className="text-[11px]" style={{ color: "#555" }}>Loading categories…</div>
+                    )}
+                    {categoryCatalog && categoryCatalog.length === 0 && (
+                      <div className="flex gap-2">
+                        <input
+                          value={categoryQuery}
+                          onChange={(e) => setCategoryQuery(e.target.value)}
+                          placeholder="Enter category ID (e.g. food.fast_food)"
+                          className="flex-1 px-3 py-2 rounded-md text-xs font-mono"
+                          style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                        />
+                        <button type="button" onClick={() => addCategory(categoryQuery.trim())} disabled={!categoryQuery.trim() || (rich.categoryIds || []).length >= 10} className="px-3 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #2a2a2e", color: "#aaa", opacity: !categoryQuery.trim() || (rich.categoryIds || []).length >= 10 ? 0.5 : 1 }}>Add</button>
                       </div>
-                    ) : (
-                      <p className="text-xs italic" style={{ color: "#555" }}>No categories set</p>
+                    )}
+                    {categoryCatalog && categoryCatalog.length > 0 && (
+                      <div className="relative">
+                        <input
+                          value={categoryQuery}
+                          onChange={(e) => setCategoryQuery(e.target.value)}
+                          placeholder="Search categories…"
+                          className="w-full px-3 py-2 rounded-md text-xs"
+                          style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                        />
+                        {categoryQuery && filteredCategories.length > 0 && (
+                          <div className="absolute top-full left-0 right-0 mt-1 z-10 max-h-48 overflow-auto rounded-md" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+                            {filteredCategories.map((c) => {
+                              const id = c.id || c.category_id;
+                              const primary = c.full_name || c.name || c.label || id;
+                              const secondary = c.full_name && c.name && c.full_name !== c.name ? c.name : null;
+                              const already = (rich.categoryIds || []).includes(id);
+                              return (
+                                <button
+                                  key={id}
+                                  type="button"
+                                  onClick={() => !already && addCategory(id)}
+                                  disabled={already}
+                                  className="w-full text-left px-3 py-1.5 text-xs hover:bg-[#222]"
+                                  style={{ color: already ? "#555" : "#ddd" }}
+                                >
+                                  <div>{primary}</div>
+                                  {secondary && (
+                                    <div className="text-[10px]" style={{ color: "#666" }}>{secondary}</div>
+                                  )}
+                                  {already && <span className="text-[10px] ml-2" style={{ color: "#555" }}>(selected)</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {(rich.categoryIds || []).length >= 10 && (
+                      <div className="text-[10px] mt-1" style={{ color: "#fbbf24" }}>Maximum of 10 categories reached</div>
                     )}
                   </div>
 
                   {/* Coordinates */}
-                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
-                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Map Coordinates Override</div>
-                    {rich.coordinates?.latitude != null && rich.coordinates?.longitude != null ? (
-                      <div className="font-mono text-xs" style={{ color: "#aaa" }}>
-                        {rich.coordinates.latitude}, {rich.coordinates.longitude}
-                      </div>
-                    ) : (
-                      <p className="text-xs italic" style={{ color: "#555" }}>Using auto-geocoded coordinates from address</p>
-                    )}
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                      Map Coordinates Override <span style={{ color: "#555" }}>(blank = auto-geocode from address)</span>
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="number"
+                        step="any"
+                        min="-90"
+                        max="90"
+                        value={rich.coordinates?.latitude ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value === "" ? null : Number(e.target.value);
+                          if (v === null && rich.coordinates?.longitude == null) {
+                            updateRich("coordinates", null);
+                          } else {
+                            updateRich("coordinates", { ...(rich.coordinates || {}), latitude: v });
+                          }
+                        }}
+                        placeholder="Latitude (e.g. 33.5602)"
+                        className="px-3 py-2 rounded-md text-xs font-mono"
+                        style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                      />
+                      <input
+                        type="number"
+                        step="any"
+                        min="-180"
+                        max="180"
+                        value={rich.coordinates?.longitude ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value === "" ? null : Number(e.target.value);
+                          if (v === null && rich.coordinates?.latitude == null) {
+                            updateRich("coordinates", null);
+                          } else {
+                            updateRich("coordinates", { ...(rich.coordinates || {}), longitude: v });
+                          }
+                        }}
+                        placeholder="Longitude (e.g. -81.7196)"
+                        className="px-3 py-2 rounded-md text-xs font-mono"
+                        style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                      />
+                    </div>
                   </div>
 
                   {/* Featured message */}
-                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
-                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Featured Message</div>
-                    {rich.featuredMessage ? (
-                      <>
-                        <p className="text-xs" style={{ color: "#ccc" }}>{rich.featuredMessage}</p>
-                        {rich.featuredMessageUrl && (
-                          <p className="text-[11px] mt-1 font-mono break-all" style={{ color: "#93c5fd" }}>{rich.featuredMessageUrl}</p>
-                        )}
-                      </>
-                    ) : (
-                      <p className="text-xs italic" style={{ color: "#555" }}>No featured message set</p>
-                    )}
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                      Featured Message <span style={{ color: "#555" }}>(max 50 chars)</span>
+                    </label>
+                    <input
+                      value={rich.featuredMessage || ""}
+                      maxLength={50}
+                      onChange={(e) => updateRich("featuredMessage", e.target.value)}
+                      placeholder="Promotional message (optional)"
+                      className="w-full px-3 py-2 rounded-md text-xs"
+                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                    />
+                    <input
+                      value={rich.featuredMessageUrl || ""}
+                      onChange={(e) => updateRich("featuredMessageUrl", e.target.value)}
+                      placeholder="Call-to-action URL (optional)"
+                      className="w-full px-3 py-2 mt-1.5 rounded-md text-xs font-mono"
+                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                    />
                   </div>
 
                   {/* Social */}
-                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
-                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Social</div>
-                    <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>Social</label>
+                    <div className="grid grid-cols-3 gap-2">
                       <div>
-                        <div className="text-[10px] uppercase tracking-wider" style={{ color: "#555" }}>Instagram</div>
-                        <div className="font-mono" style={{ color: rich.instagramUsername ? "#aaa" : "#555" }}>
-                          {rich.instagramUsername ? `@${rich.instagramUsername}` : "—"}
-                        </div>
+                        <div className="text-[10px] uppercase tracking-wider mb-1" style={{ color: "#555" }}>Instagram</div>
+                        <input
+                          value={rich.instagramUsername || ""}
+                          maxLength={30}
+                          onChange={(e) => updateRich("instagramUsername", e.target.value.replace(/^@/, ""))}
+                          placeholder="handle"
+                          className="w-full px-2 py-1.5 rounded-md text-xs font-mono"
+                          style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                        />
                       </div>
                       <div>
-                        <div className="text-[10px] uppercase tracking-wider" style={{ color: "#555" }}>Twitter / X</div>
-                        <div className="font-mono" style={{ color: rich.twitterUsername ? "#aaa" : "#555" }}>
-                          {rich.twitterUsername ? `@${rich.twitterUsername}` : "—"}
-                        </div>
+                        <div className="text-[10px] uppercase tracking-wider mb-1" style={{ color: "#555" }}>Twitter / X</div>
+                        <input
+                          value={rich.twitterUsername || ""}
+                          maxLength={15}
+                          onChange={(e) => updateRich("twitterUsername", e.target.value.replace(/^@/, ""))}
+                          placeholder="handle"
+                          className="w-full px-2 py-1.5 rounded-md text-xs font-mono"
+                          style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                        />
                       </div>
                       <div>
-                        <div className="text-[10px] uppercase tracking-wider" style={{ color: "#555" }}>YouTube</div>
-                        <div className="font-mono break-all" style={{ color: rich.youtubeVideo ? "#aaa" : "#555" }}>
-                          {rich.youtubeVideo || "—"}
-                        </div>
+                        <div className="text-[10px] uppercase tracking-wider mb-1" style={{ color: "#555" }}>YouTube</div>
+                        <input
+                          value={rich.youtubeVideo || ""}
+                          maxLength={150}
+                          onChange={(e) => updateRich("youtubeVideo", e.target.value)}
+                          placeholder="https://youtube.com/..."
+                          className="w-full px-2 py-1.5 rounded-md text-xs font-mono"
+                          style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                        />
                       </div>
                     </div>
                   </div>
 
-                  {/* Misc / metadata */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="px-3 py-2 rounded-md" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
-                      <span className="text-[10px] font-semibold uppercase tracking-wider block" style={{ color: "#555" }}>Suppress Address</span>
-                      <span className="text-xs font-mono" style={{ color: "#aaa" }}>{rich.suppressAddress ? "Yes (hidden)" : "No (shown)"}</span>
-                    </div>
-                    {rich.locationStatus && (
-                      <div className="px-3 py-2 rounded-md" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
-                        <span className="text-[10px] font-semibold uppercase tracking-wider block" style={{ color: "#555" }}>New-API Status</span>
-                        <span className="text-xs font-mono" style={{ color: "#aaa" }}>{rich.locationStatus}</span>
-                      </div>
-                    )}
+                  {/* Suppress address */}
+                  <div className="flex items-center gap-2.5 px-3 py-2 rounded-md" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
+                    <input
+                      type="checkbox"
+                      id="suppress-address"
+                      checked={!!rich.suppressAddress}
+                      onChange={(e) => updateRich("suppressAddress", e.target.checked)}
+                      style={{ accentColor: brandColor }}
+                    />
+                    <label htmlFor="suppress-address" className="text-xs cursor-pointer" style={{ color: "#ccc" }}>
+                      Hide physical address from public listings
+                      <span className="text-[10px] block" style={{ color: "#555" }}>For service-area businesses without a storefront</span>
+                    </label>
                   </div>
+
+                  {rich.locationStatus && (
+                    <div className="px-3 py-2 rounded-md flex items-center gap-2" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
+                      <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: "#555" }}>New-API Status</span>
+                      <span className="text-xs font-mono" style={{ color: "#aaa" }}>{rich.locationStatus}</span>
+                    </div>
+                  )}
                 </>
               )}
             </div>

@@ -298,4 +298,50 @@ async function call(label, method, url, body, auth = "bearer") {
   console.log(`\n${pad(72, "═")}`);
   console.log("Done. Read above for results.");
   console.log("All write attempts used validate_only=true — nothing was modified.");
+
+  // 7. Categories endpoint probes — base /categories returned 400 (exists
+  //    but malformed). Walk common parameter combos to find the right one.
+  console.log(`\n${pad(72, "═")}`);
+  console.log("STEP 7 — NEW API categories endpoint probes");
+  console.log(`${pad(72, "═")}`);
+
+  const catProbes = [
+    { url: `${NEW_BASE}/categories?country=US` },
+    { url: `${NEW_BASE}/categories?country=US&limit=50` },
+    { url: `${NEW_BASE}/categories?country=US&language=en` },
+    { url: `${NEW_BASE}/categories?language=en` },
+    { url: `${NEW_BASE}/categories?limit=50&offset=0` },
+    { url: `${NEW_BASE}/categories?country=us` }, // lowercase
+    { url: `${NEW_BASE}/categories?country_code=US` },
+    { url: `${NEW_BASE}/category` }, // singular
+    { url: `${NEW_BASE}/business-categories` }, // alt name
+    { url: `${NEW_BASE}/categories?search=food` }, // maybe needs search filter
+  ];
+
+  const catSummaries = [];
+  for (const p of catProbes) {
+    const r = await call(`probe ${p.url.replace(NEW_BASE, "")}`, "GET", p.url, null, "apikey");
+    catSummaries.push({
+      url: p.url.replace(NEW_BASE, ""),
+      status: r.status,
+      isArray: Array.isArray(r.body?.data),
+      count: Array.isArray(r.body?.data) ? r.body.data.length : 0,
+      firstKey: Array.isArray(r.body?.data) && r.body.data[0] ? Object.keys(r.body.data[0]).slice(0, 6).join(",") : "—",
+    });
+  }
+
+  console.log(`\n${pad(72, "─")}`);
+  console.log("CATEGORIES SUMMARY");
+  console.log(`${pad(72, "─")}`);
+  console.table(catSummaries);
+
+  const winner = catSummaries.find((s) => s.status === 200 && s.count > 0);
+  if (winner) {
+    console.log(`\n✓ Found a working categories endpoint: ${winner.url}`);
+    console.log(`  Returned ${winner.count} items with keys: ${winner.firstKey}`);
+    console.log(`  Update lib/semrush-rich.js getCategories() to use this path.`);
+  } else {
+    console.log("\n✗ None of the probed URLs returned a categories list.");
+    console.log("  Will need a Semrush support ticket or different doc source for the right path.");
+  }
 })();
