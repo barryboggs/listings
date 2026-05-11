@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { DEFAULT_HOURS, getBrandConfig } from "@/lib/data";
 
 const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
@@ -52,6 +52,49 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
   const [activeTab, setActiveTab] = useState("details");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  // Rich fields (description / categories / coordinates / social) come from
+  // the new Semrush API via /api/semrush/rich/[id]. Lazy-fetched on mount.
+  // Phase 2 is read-only — Phase 3 will hook up writes.
+  const [rich, setRich] = useState(null);
+  const [richState, setRichState] = useState("loading"); // loading | ready | unavailable | error
+  const [richReason, setRichReason] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const oldId = location.semrushId || location.id;
+    if (!oldId) {
+      setRichState("unavailable");
+      setRichReason("no_id");
+      return;
+    }
+    setRichState("loading");
+    fetch(`/api/semrush/rich/${oldId}`)
+      .then((r) => r.json().then((b) => ({ ok: r.ok, body: b })))
+      .then(({ ok, body }) => {
+        if (cancelled) return;
+        if (!ok) {
+          setRichState("error");
+          setRichReason(body?.error || "Failed to fetch rich fields");
+          return;
+        }
+        if (body.rich) {
+          setRich(body.rich);
+          setRichState("ready");
+        } else {
+          setRichState("unavailable");
+          setRichReason(body.reason || "unavailable");
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setRichState("error");
+        setRichReason(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [location.semrushId, location.id]);
 
   const hasErrors = (location.semrushErrors || []).length > 0;
 
@@ -108,7 +151,7 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
     setHolidayHours(next);
   };
 
-  const tabs = ["details", "hours", "status"];
+  const tabs = ["details", "hours", "status", "extras"];
   if (hasErrors) tabs.push("errors");
 
   const fields = [
@@ -314,6 +357,142 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
                   <input type="date" value={formData.reopenDate || ""} onChange={(e) => setFormData({ ...formData, reopenDate: e.target.value })} className="px-3 py-2 rounded-md text-sm" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd", width: "200px" }} />
                   <p className="text-[10px]" style={{ color: "#555" }}>Must be after today and before 2038-01-01</p>
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* EXTRAS TAB — rich fields from the new local API (read-only in Phase 2) */}
+          {activeTab === "extras" && (
+            <div className="space-y-4">
+              {richState === "loading" && (
+                <div className="py-8 text-center text-xs" style={{ color: "#666" }}>Loading rich fields…</div>
+              )}
+
+              {richState === "unavailable" && (
+                <div className="px-4 py-3 rounded-lg" style={{ background: "#2d1b00", border: "1px solid #5c3a00" }}>
+                  <div className="text-xs font-semibold mb-1" style={{ color: "#fbbf24" }}>Rich fields unavailable</div>
+                  <p className="text-[11px]" style={{ color: "#a78bfa99" }}>
+                    {richReason === "no_apikey"
+                      ? "SEMRUSH_API_KEY is not set on this deployment — extras can't load."
+                      : richReason === "no_mapping"
+                      ? "No new-API mapping for this location yet. An admin needs to run the rich-field mapping sync on /dashboard/admin."
+                      : "Rich fields are not available for this location."}
+                  </p>
+                </div>
+              )}
+
+              {richState === "error" && (
+                <div className="px-4 py-3 rounded-lg" style={{ background: "#2d0a0a20", border: "1px solid #5c1a1a40" }}>
+                  <div className="text-xs font-semibold mb-1" style={{ color: "#f87171" }}>Couldn't load rich fields</div>
+                  <p className="text-[11px] font-mono" style={{ color: "#ccc" }}>{richReason}</p>
+                </div>
+              )}
+
+              {richState === "ready" && rich && (
+                <>
+                  <div className="text-[10px] mb-1" style={{ color: "#555" }}>
+                    Read-only preview. Editing for these fields comes in a later phase.
+                  </div>
+
+                  {/* Description */}
+                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Description</div>
+                    {rich.description ? (
+                      <p className="text-xs leading-relaxed whitespace-pre-wrap" style={{ color: "#ccc" }}>{rich.description}</p>
+                    ) : (
+                      <p className="text-xs italic" style={{ color: "#555" }}>No description set</p>
+                    )}
+                  </div>
+
+                  {/* Categories */}
+                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>
+                      Categories
+                      {rich.categoryIds?.length > 0 && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold" style={{ background: "#a78bfa20", color: "#a78bfa" }}>
+                          {rich.categoryIds.length}
+                        </span>
+                      )}
+                    </div>
+                    {rich.categoryIds?.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {rich.categoryIds.map((cid) => (
+                          <span key={cid} className="px-2 py-0.5 rounded text-[11px] font-mono" style={{ background: "#151517", border: "1px solid #2a2a2e", color: "#aaa" }}>
+                            {cid}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs italic" style={{ color: "#555" }}>No categories set</p>
+                    )}
+                  </div>
+
+                  {/* Coordinates */}
+                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Map Coordinates Override</div>
+                    {rich.coordinates?.latitude != null && rich.coordinates?.longitude != null ? (
+                      <div className="font-mono text-xs" style={{ color: "#aaa" }}>
+                        {rich.coordinates.latitude}, {rich.coordinates.longitude}
+                      </div>
+                    ) : (
+                      <p className="text-xs italic" style={{ color: "#555" }}>Using auto-geocoded coordinates from address</p>
+                    )}
+                  </div>
+
+                  {/* Featured message */}
+                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Featured Message</div>
+                    {rich.featuredMessage ? (
+                      <>
+                        <p className="text-xs" style={{ color: "#ccc" }}>{rich.featuredMessage}</p>
+                        {rich.featuredMessageUrl && (
+                          <p className="text-[11px] mt-1 font-mono break-all" style={{ color: "#93c5fd" }}>{rich.featuredMessageUrl}</p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-xs italic" style={{ color: "#555" }}>No featured message set</p>
+                    )}
+                  </div>
+
+                  {/* Social */}
+                  <div className="px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "#777" }}>Social</div>
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider" style={{ color: "#555" }}>Instagram</div>
+                        <div className="font-mono" style={{ color: rich.instagramUsername ? "#aaa" : "#555" }}>
+                          {rich.instagramUsername ? `@${rich.instagramUsername}` : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider" style={{ color: "#555" }}>Twitter / X</div>
+                        <div className="font-mono" style={{ color: rich.twitterUsername ? "#aaa" : "#555" }}>
+                          {rich.twitterUsername ? `@${rich.twitterUsername}` : "—"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider" style={{ color: "#555" }}>YouTube</div>
+                        <div className="font-mono break-all" style={{ color: rich.youtubeVideo ? "#aaa" : "#555" }}>
+                          {rich.youtubeVideo || "—"}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Misc / metadata */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="px-3 py-2 rounded-md" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
+                      <span className="text-[10px] font-semibold uppercase tracking-wider block" style={{ color: "#555" }}>Suppress Address</span>
+                      <span className="text-xs font-mono" style={{ color: "#aaa" }}>{rich.suppressAddress ? "Yes (hidden)" : "No (shown)"}</span>
+                    </div>
+                    {rich.locationStatus && (
+                      <div className="px-3 py-2 rounded-md" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
+                        <span className="text-[10px] font-semibold uppercase tracking-wider block" style={{ color: "#555" }}>New-API Status</span>
+                        <span className="text-xs font-mono" style={{ color: "#aaa" }}>{rich.locationStatus}</span>
+                      </div>
+                    )}
+                  </div>
+                </>
               )}
             </div>
           )}

@@ -101,7 +101,7 @@ Important consequences:
 - The deprecated API is the **workhorse** — reads, single edits, bulk edits all stay there. Don't touch the hot path.
 - The rich API is a **supplement** for fields the deprecated API doesn't expose. New code that touches description/categories/coordinates/social goes through `lib/semrush-rich.js`.
 - **Old-API `id` ≠ rich-API `location_id`.** [lib/db.js](lib/db.js) `lm_shop_numbers` carries a `semrush_new_id` column mapping the two. Populated by `POST /api/db/sync-rich-mappings` (admin button on [/dashboard/admin](app/dashboard/admin/page.js)) which matches by website URL → phone → address+city — same logic as the existing shop-number matcher. Re-run any time; idempotent.
-- Use `getNewIdForOldId(oldId)` from [lib/db.js](lib/db.js) when routes need to bridge between APIs.
+- Use `getNewIdForOldId(oldId)` from [lib/db.js](lib/db.js) when routes need to bridge between APIs. The "Extras" tab in [components/EditModal.js](components/EditModal.js) consumes `GET /api/semrush/rich/[oldId]` — the route resolves the mapping internally and returns `{ rich: {...} }` on hit, or `{ rich: null, reason: "no_mapping" | "no_apikey" }` for warnable states (NOT errors, so the UI can show a friendly banner instead of a 500).
 - The rich client uses an in-process 24h cache for `getCategories()` — fine for serverless workers, will repopulate per cold start.
 
 Status helpers: `getTokenStatus()` (old API) and `getRichStatus()` (rich API) both return `{ hasToken / hasKey, ... }`. **Neither validates the credential actually works** — see "Misleading badge" below.
