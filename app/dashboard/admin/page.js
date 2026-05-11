@@ -167,6 +167,8 @@ export default function AdminPage() {
   const [brands, setBrands] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState(null);
 
   // Fetch users and brands on mount
   useEffect(() => {
@@ -248,6 +250,26 @@ export default function AdminPage() {
     setEditingUser(undefined);
   };
 
+  const handleSyncRichMappings = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const res = await fetch("/api/db/sync-rich-mappings", { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setSyncResult(data);
+        showToast(`Mapping synced: ${data.matched}/${data.oldCount} locations matched`);
+        logActivity("Synced rich-field mappings", `${data.matched} matched, ${data.updated} shop rows updated`);
+      } else {
+        showToast(`Sync failed: ${data.error || res.status}`);
+      }
+    } catch (e) {
+      showToast(`Sync failed: ${e.message}`);
+    }
+    setSyncing(false);
+  };
+
   const handleDelete = async (user) => {
     setSaving(true);
     try {
@@ -305,6 +327,50 @@ export default function AdminPage() {
         {users.map((user) => (
           <UserRow key={user.id} user={user} onEdit={setEditingUser} onDelete={setDeletingUser} />
         ))}
+      </div>
+
+      <div className="mt-5 p-4 rounded-lg" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div>
+            <h4 className="text-xs font-bold" style={{ color: "#aaa" }}>Semrush Integration</h4>
+            <p className="text-[11px] mt-0.5" style={{ color: "#666" }}>
+              Map old-API location IDs to new-API IDs so rich fields (description, categories, coordinates, social) can load.
+            </p>
+          </div>
+          <button
+            onClick={handleSyncRichMappings}
+            disabled={syncing}
+            className="px-4 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
+            style={{ background: "#0ea5e9", opacity: syncing ? 0.5 : 1 }}
+          >
+            {syncing ? "Syncing…" : "Sync rich-field mappings"}
+          </button>
+        </div>
+        {syncResult && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] mb-3">
+            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+              <div style={{ color: "#888" }}>Old API locations</div>
+              <div className="text-base font-bold text-white">{syncResult.oldCount}</div>
+            </div>
+            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+              <div style={{ color: "#888" }}>New API locations</div>
+              <div className="text-base font-bold text-white">{syncResult.newCount}</div>
+            </div>
+            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+              <div style={{ color: "#888" }}>Matched</div>
+              <div className="text-base font-bold" style={{ color: "#34d399" }}>{syncResult.matched}</div>
+            </div>
+            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+              <div style={{ color: "#888" }}>Shop rows updated</div>
+              <div className="text-base font-bold text-white">{syncResult.updated}</div>
+            </div>
+            <div className="col-span-2 sm:col-span-4 text-[11px] mt-1" style={{ color: "#666" }}>
+              By strategy — url: {syncResult.strategies.url} · phone: {syncResult.strategies.phone} · address: {syncResult.strategies.address}
+              {syncResult.missing > 0 && ` · matched-but-no-shop-row: ${syncResult.missing}`}
+              {syncResult.ambiguous > 0 && ` · ambiguous: ${syncResult.ambiguous}`}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="mt-5 p-4 rounded-lg" style={{ background: "#1a1a1d", border: "1px solid #222" }}>

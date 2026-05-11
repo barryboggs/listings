@@ -15,7 +15,8 @@ There is no test framework configured. The project is plain JavaScript (no TypeS
 
 Required env vars (see `.env.example`):
 - `JWT_SECRET` — random ≥32 chars. There is a hardcoded fallback in `lib/auth.js` and `middleware.js`; never rely on it in production.
-- `SEMRUSH_BEARER_TOKEN` — optional. Without it the app runs in **demo mode** (seed data from `lib/data.js`).
+- `SEMRUSH_BEARER_TOKEN` — optional. Without it the app runs in **demo mode** (seed data from `lib/data.js`). Obtained via OAuth Device Authorization flow — run `node scripts/get-semrush-token.mjs` to (re)generate.
+- `SEMRUSH_API_KEY` — optional. Enables the "rich" fields (description, categories, coordinates, social) via the newer local API. This is a **different credential type** from the Bearer token above — pulled from the Semrush Subscription Info page, not OAuth. Without it those fields are read-only / unavailable.
 - `POSTGRES_URL` / `DATABASE_URL` (any of the four Vercel Postgres vars) — optional. Without it `lib/db.js` falls back to in-memory storage seeded from `DEMO_USERS` and `ACTIVITY_LOG`.
 
 To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`), an admin must POST `/api/db` once after deploying with the env var set.
@@ -81,6 +82,33 @@ The general bulk-edit modal (`components/BulkModal.js`) drives the same pattern 
 ### Brand detection
 
 `detectBrand()` in `lib/semrush.js` runs ordered substring matches against name+URL. **Order matters**: Canadian variants (`carstar-ca`, `take5-ca`, `maaco-ca`) must come before their US counterparts because the US patterns are substrings of the Canadian ones. When adding a new brand, add it to `BRAND_PATTERNS` here AND to `BRANDS` in `lib/data.js` (which carries display name + color). `getBrandConfig()` will fabricate a deterministic color for unknown brands rather than crash.
+
+### Two Semrush APIs (hybrid client)
+
+The codebase talks to **two distinct Semrush APIs** with different shapes, different auth, and different ID spaces. Phase 0 of the migration spike confirmed:
+
+| | Deprecated API ([lib/semrush.js](lib/semrush.js)) | Rich API ([lib/semrush-rich.js](lib/semrush-rich.js)) |
+|---|---|---|
+| Base URL | `/apis/v4-raw/listing-management/v1` | `/apis/v4/local/v1` |
+| Auth | `Authorization: Bearer <token>` (OAuth Device Auth, env `SEMRUSH_BEARER_TOKEN`) | `Authorization: Apikey <key>` (Subscription Info page, env `SEMRUSH_API_KEY`) |
+| Field naming | camelCase (`locationName`, `holidayHours`) | snake_case (`business_name`, `special_hours`) |
+| Update verb | `PUT` (full payload, required: name/city/address/phone) | `PATCH` with `update_mask=field,field` (partial) |
+| Bulk update | Yes — 50 locations / req, 5 req/MINUTE | **None.** Only single-location PATCH exists. |
+| ID field | `id` | `location_id` — **different value** from old-API `id` for the same shop |
+| Extra fields | none | `description`, `category_ids`, `coordinates`, `featured_message`, `suppress_address`, `service_area_places`, social handles |
+
+Important consequences:
+- The deprecated API is the **workhorse** — reads, single edits, bulk edits all stay there. Don't touch the hot path.
+- The rich API is a **supplement** for fields the deprecated API doesn't expose. New code that touches description/categories/coordinates/social goes through `lib/semrush-rich.js`.
+- **Old-API `id` ≠ rich-API `location_id`.** [lib/db.js](lib/db.js) `lm_shop_numbers` carries a `semrush_new_id` column mapping the two. Populated by `POST /api/db/sync-rich-mappings` (admin button on [/dashboard/admin](app/dashboard/admin/page.js)) which matches by website URL → phone → address+city — same logic as the existing shop-number matcher. Re-run any time; idempotent.
+- Use `getNewIdForOldId(oldId)` from [lib/db.js](lib/db.js) when routes need to bridge between APIs.
+- The rich client uses an in-process 24h cache for `getCategories()` — fine for serverless workers, will repopulate per cold start.
+
+Status helpers: `getTokenStatus()` (old API) and `getRichStatus()` (rich API) both return `{ hasToken / hasKey, ... }`. **Neither validates the credential actually works** — see "Misleading badge" below.
+
+### Misleading API-Live badge (known issue, deferred to Phase 4)
+
+The "API Live" badge in [app/dashboard/layout.js](app/dashboard/layout.js) only checks whether `SEMRUSH_BEARER_TOKEN` is set, not whether it works. An expired token will silently fall through every API call to demo mode while the badge still shows green. If you're investigating "why is the user seeing demo data," check the `source` field of `GET /api/semrush/locations` rather than trusting the badge. Phase 4 plans a real ping-based status.
 
 ### Shop numbers
 
