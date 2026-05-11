@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
 import { getAllLocations, getTokenStatus } from "@/lib/semrush";
 import { getAllRichLocations, getRichStatus } from "@/lib/semrush-rich";
-import { bulkSetNewIds, logActivity } from "@/lib/db";
+import { bulkSetNewIds, initDatabase, logActivity } from "@/lib/db";
 
 /**
  * POST /api/db/sync-rich-mappings
@@ -40,6 +40,12 @@ export async function POST(request) {
       { status: 412 }
     );
   }
+
+  // Ensure the schema is up to date — adds semrush_new_id / rich_matched_at
+  // columns if they're missing (CREATE TABLE / ALTER TABLE statements are
+  // all idempotent). Without this, sync runs against a stale schema would
+  // silently fail every UPDATE with "column does not exist".
+  await initDatabase();
 
   let oldLocations;
   let richLocations;
@@ -119,7 +125,7 @@ export async function POST(request) {
     }
   }
 
-  const { updated, missing } = await bulkSetNewIds(matches);
+  const { updated, missing, errors } = await bulkSetNewIds(matches);
 
   await logActivity({
     user: user.name,
@@ -138,6 +144,7 @@ export async function POST(request) {
     ambiguous,
     strategies,
     unmatchedOld,
+    dbErrors: errors,
   });
 }
 

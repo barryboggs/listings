@@ -369,6 +369,14 @@ export default function AdminPage() {
               {syncResult.missing > 0 && ` · matched-but-no-shop-row: ${syncResult.missing}`}
               {syncResult.ambiguous > 0 && ` · ambiguous: ${syncResult.ambiguous}`}
             </div>
+            {syncResult.dbErrors && syncResult.dbErrors.length > 0 && (
+              <div className="col-span-2 sm:col-span-4 px-3 py-2 rounded text-[11px]" style={{ background: "#2d0a0a", border: "1px solid #5c1a1a", color: "#f87171" }}>
+                <div className="font-semibold mb-1">Database errors (first {syncResult.dbErrors.length}):</div>
+                {syncResult.dbErrors.map((e, i) => (
+                  <div key={i} className="font-mono text-[10px] leading-snug">{e}</div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
