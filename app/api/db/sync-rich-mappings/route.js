@@ -46,7 +46,7 @@ export async function POST(request) {
   try {
     [oldLocations, richLocations] = await Promise.all([
       getAllLocations(),
-      getAllRichLocations({ page_size: 100 }),
+      getAllRichLocations({ limit: 50 }),
     ]);
   } catch (error) {
     return NextResponse.json(

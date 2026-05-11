@@ -236,6 +236,65 @@ async function call(label, method, url, body, auth = "bearer") {
     await call(p.label, p.method, p.url, p.body, "apikey");
   }
 
+  // 6. Pagination probe — does the new API actually paginate, and what's
+  //    the real per-page cap? Hit page 1, 2, 3 with different page_size
+  //    values and compare.
+  console.log(`\n${pad(72, "═")}`);
+  console.log("STEP 6 — NEW API pagination probe");
+  console.log(`${pad(72, "═")}`);
+
+  const probesPage = [
+    { page: 1, page_size: 50 },
+    { page: 2, page_size: 50 },
+    { page: 3, page_size: 50 },
+    { page: 1, page_size: 200 },
+    { page: 1, page_size: 500 },
+  ];
+
+  const summaries = [];
+  for (const p of probesPage) {
+    const r = await call(
+      `pagination probe page=${p.page} page_size=${p.page_size}`,
+      "GET",
+      `${NEW_BASE}/locations?page=${p.page}&page_size=${p.page_size}`,
+      null,
+      "apikey"
+    );
+    const items = r.body?.data || [];
+    summaries.push({
+      page: p.page,
+      page_size: p.page_size,
+      returned: items.length,
+      firstId: items[0]?.location_id || null,
+      lastId: items[items.length - 1]?.location_id || null,
+    });
+  }
+
+  console.log(`\n${pad(72, "─")}`);
+  console.log("PAGINATION SUMMARY");
+  console.log(`${pad(72, "─")}`);
+  console.table(summaries);
+
+  const page1 = summaries.find((s) => s.page === 1 && s.page_size === 50);
+  const page2 = summaries.find((s) => s.page === 2);
+  const page1big = summaries.find((s) => s.page_size === 500);
+
+  console.log("\nDiagnostic:");
+  if (page2?.returned === 0) {
+    console.log("  → page=2 returned 0 items. Account scope appears to be limited to 50 locations on the Apikey.");
+  } else if (page2?.firstId && page1?.firstId && page2.firstId === page1.firstId) {
+    console.log("  → page=2 returned the SAME first location as page=1. The API is ignoring the `page` parameter.");
+    console.log("    We'd need a different pagination scheme (cursor? offset?) or a different param name.");
+  } else if (page2?.returned > 0) {
+    console.log("  → page=2 returned distinct data. Pagination IS honored. The fix in lib/semrush-rich.js should work — check that Vercel has the latest deploy.");
+  }
+
+  if (page1big?.returned && page1big.returned > 50) {
+    console.log(`  → page_size=500 returned ${page1big.returned} items. The 50-per-page cap is NOT a hard server limit; pagination is what we need.`);
+  } else if (page1big?.returned === 50) {
+    console.log("  → page_size=500 still capped at 50. The server enforces a 50-item max per page; we must paginate.");
+  }
+
   console.log(`\n${pad(72, "═")}`);
   console.log("Done. Read above for results.");
   console.log("All write attempts used validate_only=true — nothing was modified.");
