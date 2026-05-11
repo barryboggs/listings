@@ -198,6 +198,7 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
     //    before calling onSave because onSave closes the modal immediately
     //    in the parent — if rich save fails we want the modal to stay open
     //    so the user can see the error and decide what to do.
+    let richFieldsUpdated = 0;
     const changes = richDirtyChanges();
     if (Object.keys(changes).length > 0 && richState === "ready") {
       const oldId = location.semrushId || location.id;
@@ -217,6 +218,7 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
           setRich(body.rich);
           setRichInitial(body.rich);
         }
+        richFieldsUpdated = Array.isArray(body.updateMask) ? body.updateMask.length : Object.keys(changes).length;
       } catch (e) {
         setRichSaveError(`Rich save failed: ${e.message}`);
         setSaving(false);
@@ -225,15 +227,18 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
     }
 
     // 2. Core save — onSave triggers PUT /api/semrush/locations/[id] in
-    //    the parent and closes the modal. Brief "Pushed" state for visual
-    //    continuity with the previous flow.
+    //    the parent and closes the modal. The second arg lets the parent's
+    //    toast acknowledge rich fields that already saved successfully.
     setSaved(true);
     setTimeout(() => {
-      onSave({
-        ...formData,
-        businessHours: hours,
-        holidayHours: holidayHours.length > 0 ? holidayHours : undefined,
-      });
+      onSave(
+        {
+          ...formData,
+          businessHours: hours,
+          holidayHours: holidayHours.length > 0 ? holidayHours : undefined,
+        },
+        { richFieldsUpdated }
+      );
     }, 400);
   };
 

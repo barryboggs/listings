@@ -20,13 +20,95 @@ const ADMIN_NAV = [
   { href: "/dashboard/shops", icon: "#", label: "Shop Numbers" },
 ];
 
+/**
+ * Honest API-health badge. Replaces the pre-Phase 4 indicator that only
+ * checked whether SEMRUSH_BEARER_TOKEN was set (which let an expired
+ * token silently fail behind a green dot for weeks).
+ *
+ * Visual states:
+ *   - "API Live"        green   — both APIs healthy (or rich not configured)
+ *   - "Rich API issue"  amber   — old API healthy, rich API failing
+ *   - "API Error"       red     — old API failing
+ *   - "Demo Mode"       yellow  — no old-API token configured
+ *   - "Checking…"       gray    — initial load / first request hasn't finished
+ *
+ * Hovering shows the most recent error message (if any).
+ */
+function ApiHealthBadge({ health }) {
+  if (!health) {
+    return (
+      <div className="px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5"
+        style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#888" }}>
+        <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#666" }} />
+        Checking…
+      </div>
+    );
+  }
+
+  const old = health.oldApi || {};
+  const rich = health.richApi || {};
+
+  let label, dot, bg, border, color, tooltip;
+
+  if (!old.hasToken) {
+    label = "Demo Mode";
+    dot = "#fbbf24";
+    bg = "#2d1b00";
+    border = "#5c3a00";
+    color = "#fbbf24";
+    tooltip = "SEMRUSH_BEARER_TOKEN not configured — using seed data";
+  } else if (old.state === "failing") {
+    label = "API Error";
+    dot = "#f87171";
+    bg = "#2d0a0a";
+    border = "#5c1a1a";
+    color = "#f87171";
+    tooltip = old.lastErrorMessage || "Last Semrush call failed";
+  } else if (rich.hasKey && rich.state === "failing") {
+    label = "Rich API issue";
+    dot = "#fbbf24";
+    bg = "#2d1b00";
+    border = "#5c3a00";
+    color = "#fbbf24";
+    tooltip = `Rich API: ${rich.lastErrorMessage || "last call failed"}`;
+  } else if (old.state === "healthy") {
+    label = "API Live";
+    dot = "#34d399";
+    bg = "#1a2e1a";
+    border = "#2d5a2d";
+    color = "#6ee7b7";
+    tooltip = rich.hasKey && rich.state === "healthy"
+      ? "Both APIs responding"
+      : "Old API responding (rich API not yet tested)";
+  } else {
+    // hasToken but no call yet (cold start, no requests have flowed)
+    label = "API ready";
+    dot = "#93c5fd";
+    bg = "#0c1a2e";
+    border = "#1e3a5f";
+    color = "#93c5fd";
+    tooltip = "Token configured — no API calls have been made yet from this worker";
+  }
+
+  return (
+    <div
+      title={tooltip}
+      className="px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5 cursor-help"
+      style={{ background: bg, border: `1px solid ${border}`, color }}
+    >
+      <span className="w-1.5 h-1.5 rounded-full pulse-dot" style={{ background: dot }} />
+      {label}
+    </div>
+  );
+}
+
 export default function DashboardLayout({ children }) {
   const router = useRouter();
   const pathname = usePathname();
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [apiMode, setApiMode] = useState(null);
+  const [apiHealth, setApiHealth] = useState(null);
 
   useEffect(() => {
     fetch("/api/auth/me")
@@ -44,11 +126,13 @@ export default function DashboardLayout({ children }) {
         setLoading(false);
       });
 
-    // Check API mode
+    // Check actual API health (not just whether credentials are configured).
+    // Polled once on mount; refreshing /dashboard re-runs this. The endpoint
+    // reports per-API health based on whether the most recent call succeeded.
     fetch("/api/semrush/token")
       .then((res) => res.json())
-      .then((data) => setApiMode(data.mode))
-      .catch(() => setApiMode("demo"));
+      .then((data) => setApiHealth(data))
+      .catch(() => setApiHealth({ oldApi: { state: "no_token" }, richApi: { state: "no_key" } }));
   }, [router]);
 
   const handleLogout = async () => {
@@ -101,17 +185,7 @@ export default function DashboardLayout({ children }) {
           </div>
 
           <div className="flex items-center gap-3">
-            <div
-              className="px-3 py-1 rounded text-xs font-semibold flex items-center gap-1.5"
-              style={{
-                background: apiMode === "live" ? "#1a2e1a" : "#2d1b00",
-                border: `1px solid ${apiMode === "live" ? "#2d5a2d" : "#5c3a00"}`,
-                color: apiMode === "live" ? "#6ee7b7" : "#fbbf24",
-              }}
-            >
-              <span className="w-1.5 h-1.5 rounded-full pulse-dot" style={{ background: apiMode === "live" ? "#34d399" : "#fbbf24" }} />
-              {apiMode === "live" ? "API Live" : "Demo Mode"}
-            </div>
+            <ApiHealthBadge health={apiHealth} />
             <div className="flex items-center gap-2">
               <div
                 className="w-8 h-8 rounded-md flex items-center justify-center text-xs font-bold"

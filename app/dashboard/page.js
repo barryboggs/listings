@@ -102,9 +102,15 @@ export default function LocationsPage() {
     } catch { /* non-blocking */ }
   };
 
-  // Save handler — calls the API proxy, then refreshes locations
-  const handleSave = async (locationData) => {
+  // Save handler — calls the API proxy, then refreshes locations.
+  // The second arg comes from EditModal and reports how many rich fields
+  // (description / categories / coordinates / social) the modal already
+  // PATCHed against the new API before the modal closed. We include that
+  // in the toast so the user knows both surfaces accepted the change.
+  const handleSave = async (locationData, meta = {}) => {
     setEditingLocation(null);
+    const richCount = meta.richFieldsUpdated || 0;
+    const richSuffix = richCount > 0 ? ` + ${richCount} extra field${richCount === 1 ? "" : "s"}` : "";
     try {
       const res = await fetch(`/api/semrush/locations/${locationData.id}`, {
         method: "PUT",
@@ -115,22 +121,57 @@ export default function LocationsPage() {
       if (result.success) {
         showToast(
           result.source === "semrush"
-            ? "Location updated — pushed to Semrush API"
-            : "Location updated (demo mode)"
+            ? `Location updated${richSuffix} — pushed to Semrush API`
+            : `Location updated${richSuffix} (demo mode)`
         );
-        logActivity("Updated location", locationData.name, locationData.brand, `Updated via edit modal`);
+        logActivity(
+          "Updated location",
+          locationData.name,
+          locationData.brand,
+          richCount > 0 ? `Edit modal: core + ${richCount} rich field${richCount === 1 ? "" : "s"}` : "Updated via edit modal"
+        );
         fetchLocations();
+      } else if (richCount > 0) {
+        // Rich saved, but core save failed — partial success worth surfacing.
+        showToast(`Extras saved, but core update failed: ${result.error || "Update failed"}`);
       } else {
         showToast(`Error: ${result.error || "Update failed"}`);
       }
     } catch {
-      showToast("Network error — please try again");
+      showToast(
+        richCount > 0
+          ? "Extras saved, but core update hit a network error"
+          : "Network error — please try again"
+      );
     }
   };
 
-  // Bulk save handler
+  // Bulk save handler. Two flows:
+  //   - Rich fields (description / featured_message / suppress_address) were
+  //     PATCHed sequentially by BulkModal itself, since the new API has no
+  //     bulk endpoint. We just toast the result and skip the bulk-update
+  //     HTTP call below.
+  //   - Everything else goes through PUT /api/semrush/bulk-update as before.
   const handleBulkSave = async (data) => {
     setBulkBrand(null);
+    const brandName = brands.find((b) => b.id === data.brand)?.name || data.brand;
+
+    if (data.richBulk) {
+      const { succeeded, failed, skipped, total } = data.richBulk;
+      const parts = [`${succeeded}/${total} updated`];
+      if (failed > 0) parts.push(`${failed} failed`);
+      if (skipped > 0) parts.push(`${skipped} skipped (no mapping)`);
+      showToast(`Bulk ${data.field.replace(/_/g, " ")} — ${parts.join(", ")}`);
+      logActivity(
+        "Bulk rich-field update",
+        `${brandName} — ${total} locations`,
+        data.brand,
+        `Field: ${data.field} · ${succeeded} succeeded, ${failed} failed, ${skipped} skipped`
+      );
+      fetchLocations();
+      return;
+    }
+
     try {
       const res = await fetch("/api/semrush/bulk-update", {
         method: "PUT",
@@ -139,7 +180,6 @@ export default function LocationsPage() {
       });
       const result = await res.json();
       if (result.success) {
-        const brandName = brands.find((b) => b.id === data.brand)?.name || data.brand;
         showToast(
           result.source === "semrush"
             ? `Bulk update pushed — ${result.updated} locations updated`

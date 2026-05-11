@@ -121,9 +121,33 @@ The picker in EditModal hits `GET /api/semrush/categories` once on mount. That r
 
 Status helpers: `getTokenStatus()` (old API) and `getRichStatus()` (rich API) both return `{ hasToken / hasKey, ... }`. **Neither validates the credential actually works** — see "Misleading badge" below.
 
-### Misleading API-Live badge (known issue, deferred to Phase 4)
+### Honest API-health badge (Phase 4)
 
-The "API Live" badge in [app/dashboard/layout.js](app/dashboard/layout.js) only checks whether `SEMRUSH_BEARER_TOKEN` is set, not whether it works. An expired token will silently fall through every API call to demo mode while the badge still shows green. If you're investigating "why is the user seeing demo data," check the `source` field of `GET /api/semrush/locations` rather than trusting the badge. Phase 4 plans a real ping-based status.
+Both API client modules track `lastSuccessAt` / `lastErrorAt` / `lastErrorMessage` in module-scope state. `semrushFetch` and `richFetch` are wrapped in try/catch that calls `recordSuccess` / `recordError` so every call updates the telemetry. `getTokenStatus()` and `getRichStatus()` expose this as a `state` field: `"healthy"` (success more recent than any error), `"failing"` (error more recent than success), `"untested"` (token configured but no calls yet from this worker), `"no_token"`/`"no_key"` (not configured).
+
+[app/api/semrush/token/route.js](app/api/semrush/token/route.js) returns both APIs' state. [app/dashboard/layout.js](app/dashboard/layout.js) `ApiHealthBadge` consumes this:
+
+| Old state | Rich state | Badge |
+|---|---|---|
+| `failing` | any | "API Error" (red) — last call failed; hover for message |
+| `healthy` | `failing` | "Rich API issue" (amber) — old fine, rich broken |
+| `healthy` | healthy / untested / no_key | "API Live" (green) |
+| `no_token` | any | "Demo Mode" (yellow) |
+| `untested` | any | "API ready" (blue) — cold worker, no calls flowed yet |
+
+Telemetry is per-serverless-instance, so a cold start resets to `untested`. That's acceptable: the first real API call updates it within milliseconds.
+
+### Bulk rich-field updates (Phase 4)
+
+[components/BulkModal.js](components/BulkModal.js) supports `description`, `featured_message`, and `suppress_address` as bulk-edit fields. Because the new API has no bulk endpoint, the modal **fires sequential PATCH `/api/semrush/rich/[id]` calls** with a 250ms throttle between them — same pattern as the holiday-import flow. Progress is rendered in-modal with a live counter (`X / N`, succeeded / failed / skipped) and the first 20 failure messages.
+
+Skipped count means the location has no `semrush_new_id` mapping in `lm_shop_numbers`; the route returns 404 with `reason: "no_mapping"` and the loop continues. This is distinct from `failed`, which represents an actual API error.
+
+The parent's `handleBulkSave` in [app/dashboard/page.js](app/dashboard/page.js) detects rich-bulk by checking for a `richBulk` field on the save payload — when present, it skips the old-API bulk endpoint call entirely (the modal has already done the work) and just toasts/logs based on the supplied counts.
+
+### Misleading API-Live badge (FIXED in Phase 4)
+
+Pre-Phase 4 the badge only checked whether `SEMRUSH_BEARER_TOKEN` was set, not whether it worked — an expired token failed silently behind a green dot. Now resolved via the health telemetry described above. If you're debugging "why am I seeing demo data," hovering the badge will show the most recent error.
 
 ### Shop numbers
 

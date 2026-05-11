@@ -5,6 +5,9 @@ import { DEFAULT_HOURS, getBrandConfig } from "@/lib/data";
 
 const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 
+// `rich: true` routes the save through sequential PATCH /api/semrush/rich/[id]
+// calls (the new API has no bulk endpoint). Everything else goes through the
+// old-API bulk endpoint via the parent's onSave.
 const FIELDS = [
   { id: "hours", label: "Business Hours" },
   { id: "phone", label: "Phone" },
@@ -12,7 +15,13 @@ const FIELDS = [
   { id: "url_params", label: "URL Parameters" },
   { id: "temp_closure", label: "Temp Closure" },
   { id: "holiday_hours", label: "Holiday Hours" },
+  { id: "description", label: "Description", rich: true },
+  { id: "featured_message", label: "Featured Message", rich: true },
+  { id: "suppress_address", label: "Suppress Address", rich: true },
 ];
+
+// Throttle between sequential rich-API PATCH requests.
+const RICH_BULK_DELAY_MS = 250;
 
 export default function BulkModal({ brandId, brands: brandsList, locations: liveLocs, onClose, onSave }) {
   const brandData = (brandsList || []).find((b) => b.id === brandId) || getBrandConfig(brandId);
@@ -37,6 +46,19 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
     times: [{ from: "09:00", to: "17:00" }],
   });
 
+  // Rich-field values (Phase 4 — sent via sequential PATCH, not the bulk endpoint)
+  const [descriptionValue, setDescriptionValue] = useState("");
+  const [featuredMessageValue, setFeaturedMessageValue] = useState("");
+  const [featuredMessageUrlValue, setFeaturedMessageUrlValue] = useState("");
+  const [suppressAddressValue, setSuppressAddressValue] = useState(false);
+
+  // Progress state for rich-field bulk runs. Replaces the form while running.
+  const [richProgress, setRichProgress] = useState(null);
+  // { current, total, succeeded, failed, skipped, errors: [{ locationName, message }] }
+
+  const isRichField = !!FIELDS.find((f) => f.id === bulkField)?.rich;
+  const estimatedSeconds = Math.ceil((selected.size * RICH_BULK_DELAY_MS) / 1000) + selected.size; // delay + ~1s per request
+
   const toggleLocation = (id) => {
     const next = new Set(selected);
     next.has(id) ? next.delete(id) : next.add(id);
@@ -51,10 +73,93 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
     );
   };
 
+  // Map a rich-field id to the EditModal-shaped `changes` object the
+  // /api/semrush/rich/[id] PATCH route expects.
+  const buildRichChanges = () => {
+    switch (bulkField) {
+      case "description":
+        return { description: descriptionValue };
+      case "featured_message":
+        return {
+          featuredMessage: featuredMessageValue,
+          featuredMessageUrl: featuredMessageUrlValue,
+        };
+      case "suppress_address":
+        return { suppressAddress: suppressAddressValue };
+      default:
+        return {};
+    }
+  };
+
+  // Sequential PATCH loop for rich fields. The new API has no bulk endpoint,
+  // so we fire one request per location and report progress as we go.
+  const handleRichBulkSave = async () => {
+    const ids = Array.from(selected);
+    const changes = buildRichChanges();
+    const targets = brandLocations.filter((l) => ids.includes(l.id));
+
+    setSaving(true);
+    setRichProgress({ current: 0, total: targets.length, succeeded: 0, failed: 0, skipped: 0, errors: [] });
+
+    let succeeded = 0;
+    let failed = 0;
+    let skipped = 0;
+    const errors = [];
+
+    for (let i = 0; i < targets.length; i++) {
+      const loc = targets[i];
+      setRichProgress({ current: i + 1, total: targets.length, succeeded, failed, skipped, errors });
+
+      try {
+        const res = await fetch(`/api/semrush/rich/${loc.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ changes, locationName: loc.name }),
+        });
+        const body = await res.json();
+        if (res.ok) {
+          succeeded++;
+        } else if (res.status === 404 && body.reason === "no_mapping") {
+          skipped++;
+          if (errors.length < 20) errors.push({ locationName: loc.name, message: "No new-API mapping (run sync)" });
+        } else {
+          failed++;
+          if (errors.length < 20) errors.push({ locationName: loc.name, message: body.error || `HTTP ${res.status}` });
+        }
+      } catch (e) {
+        failed++;
+        if (errors.length < 20) errors.push({ locationName: loc.name, message: e.message });
+      }
+
+      if (i < targets.length - 1) {
+        await new Promise((r) => setTimeout(r, RICH_BULK_DELAY_MS));
+      }
+    }
+
+    setRichProgress({ current: targets.length, total: targets.length, succeeded, failed, skipped, errors });
+    setSaving(false);
+    setSaved(true);
+
+    // Fire onSave with metadata for the toast + activity log. Field value
+    // is the same changes object so the parent can show useful detail.
+    onSave({
+      field: bulkField,
+      value: changes,
+      brand: brandId,
+      locationIds: ids,
+      richBulk: { succeeded, failed, skipped, total: targets.length },
+    });
+  };
+
   const handleSave = () => {
+    if (isRichField) {
+      handleRichBulkSave();
+      return;
+    }
+
     setSaving(true);
 
-    // Build the value payload based on field type
+    // Build the value payload based on field type (old-API bulk path)
     let value;
     switch (bulkField) {
       case "phone":
@@ -257,6 +362,135 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
             </div>
           )}
 
+          {bulkField === "description" && (
+            <div className="mb-5">
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                Description <span style={{ color: "#555" }}>(10–750 chars, applied to every selected location)</span>
+              </label>
+              <textarea
+                value={descriptionValue}
+                onChange={(e) => setDescriptionValue(e.target.value)}
+                rows={4}
+                maxLength={750}
+                placeholder="Describe these locations (same text used for all)..."
+                className="w-full px-3 py-2.5 rounded-md text-xs leading-relaxed"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd", resize: "vertical" }}
+              />
+              <div className="text-[10px] mt-1 text-right" style={{ color: descriptionValue.length > 750 ? "#f87171" : "#555" }}>
+                {descriptionValue.length} / 750
+              </div>
+            </div>
+          )}
+
+          {bulkField === "featured_message" && (
+            <div className="mb-5 space-y-2">
+              <label className="block text-[11px] font-semibold uppercase tracking-wider" style={{ color: "#777" }}>
+                Featured Message <span style={{ color: "#555" }}>(max 50 chars)</span>
+              </label>
+              <input
+                value={featuredMessageValue}
+                maxLength={50}
+                onChange={(e) => setFeaturedMessageValue(e.target.value)}
+                placeholder="Promotional banner text"
+                className="w-full px-3 py-2 rounded-md text-xs"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+              />
+              <input
+                value={featuredMessageUrlValue}
+                onChange={(e) => setFeaturedMessageUrlValue(e.target.value)}
+                placeholder="Call-to-action URL (optional)"
+                className="w-full px-3 py-2 rounded-md text-xs font-mono"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+              />
+              <p className="text-[10px]" style={{ color: "#555" }}>Leave both empty to clear the featured message from all selected locations.</p>
+            </div>
+          )}
+
+          {bulkField === "suppress_address" && (
+            <div className="mb-5">
+              <label className="flex items-center gap-2.5 px-3 py-2 rounded-md cursor-pointer" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+                <input
+                  type="checkbox"
+                  checked={suppressAddressValue}
+                  onChange={(e) => setSuppressAddressValue(e.target.checked)}
+                  style={{ accentColor: brandColor }}
+                />
+                <div>
+                  <div className="text-xs" style={{ color: "#ccc" }}>
+                    {suppressAddressValue ? "Hide" : "Show"} physical addresses across selected locations
+                  </div>
+                  <div className="text-[10px]" style={{ color: "#555" }}>For service-area businesses without storefronts</div>
+                </div>
+              </label>
+            </div>
+          )}
+
+          {/* Estimated-time warning for rich-field bulk runs */}
+          {isRichField && !richProgress && selected.size > 0 && (
+            <div className="mb-4 px-3 py-2 rounded-md text-[11px] flex items-start gap-2" style={{ background: "#2d1b00", border: "1px solid #5c3a00", color: "#fbbf24" }}>
+              <span>⚠</span>
+              <div>
+                <div className="font-semibold mb-0.5">Rich fields don't have a bulk endpoint</div>
+                <div style={{ color: "#fbbf24cc" }}>
+                  Each location is updated with its own PATCH request, throttled to {RICH_BULK_DELAY_MS}ms apart.
+                  Estimated runtime: {selected.size} requests · ~{estimatedSeconds}s. Keep this tab open until it finishes.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Rich-bulk progress display */}
+          {richProgress && (
+            <div className="mb-5 px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+              <div className="flex justify-between items-baseline mb-2">
+                <span className="text-xs font-semibold" style={{ color: "#aaa" }}>
+                  {richProgress.current < richProgress.total ? "Updating…" : "Done"}
+                </span>
+                <span className="text-[11px] font-mono" style={{ color: "#888" }}>
+                  {richProgress.current} / {richProgress.total}
+                </span>
+              </div>
+              <div className="w-full h-1.5 rounded-full overflow-hidden mb-3" style={{ background: "#111113" }}>
+                <div
+                  className="h-full transition-all"
+                  style={{
+                    width: `${richProgress.total > 0 ? (richProgress.current / richProgress.total) * 100 : 0}%`,
+                    background: brandColor,
+                  }}
+                />
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-[11px]">
+                <div>
+                  <div style={{ color: "#888" }}>Succeeded</div>
+                  <div className="font-bold" style={{ color: "#34d399" }}>{richProgress.succeeded}</div>
+                </div>
+                <div>
+                  <div style={{ color: "#888" }}>Failed</div>
+                  <div className="font-bold" style={{ color: richProgress.failed > 0 ? "#f87171" : "#555" }}>{richProgress.failed}</div>
+                </div>
+                <div>
+                  <div style={{ color: "#888" }}>Skipped (no mapping)</div>
+                  <div className="font-bold" style={{ color: richProgress.skipped > 0 ? "#fbbf24" : "#555" }}>{richProgress.skipped}</div>
+                </div>
+              </div>
+              {richProgress.errors.length > 0 && (
+                <div className="mt-3 pt-3" style={{ borderTop: "1px solid #2a2a2e" }}>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#f87171" }}>
+                    Failures (first {Math.min(richProgress.errors.length, 20)})
+                  </div>
+                  <div className="space-y-0.5 max-h-32 overflow-auto">
+                    {richProgress.errors.map((e, i) => (
+                      <div key={i} className="text-[10px] flex gap-2">
+                        <span style={{ color: "#ccc" }}>{e.locationName}</span>
+                        <span className="font-mono" style={{ color: "#f87171" }}>{e.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Location selector */}
           <span className="text-xs block mb-2" style={{ color: "#888" }}>Apply to locations</span>
           <div className="space-y-1">
@@ -280,10 +514,22 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
             {bulkField === "hours" ? "UpdateLocations bulk endpoint" : `Updating ${bulkField.replace(/_/g, " ")}`}
           </span>
           <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>Cancel</button>
-            <button onClick={handleSave} disabled={saving || saved || selected.size === 0} className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity" style={{ background: saved ? "#16a34a" : brandColor, opacity: saving || selected.size === 0 ? 0.6 : 1 }}>
-              {saved ? "✓ Pushed" : saving ? `Updating ${selected.size} locations...` : `Update ${selected.size} Locations`}
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-md text-xs font-semibold"
+              style={{
+                background: saved ? "#1c1c1f" : "#222",
+                border: `1px solid ${saved ? brandColor + "60" : "#333"}`,
+                color: saved ? brandColor : "#aaa",
+              }}
+            >
+              {saved ? "Close" : "Cancel"}
             </button>
+            {!saved && (
+              <button onClick={handleSave} disabled={saving || selected.size === 0} className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity" style={{ background: brandColor, opacity: saving || selected.size === 0 ? 0.6 : 1 }}>
+                {saving ? `Updating ${selected.size} locations...` : `Update ${selected.size} Locations`}
+              </button>
+            )}
           </div>
         </div>
       </div>
