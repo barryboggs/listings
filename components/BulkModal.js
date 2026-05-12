@@ -8,6 +8,10 @@ const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"
 // `rich: true` routes the save through sequential PATCH /api/semrush/rich/[id]
 // calls (the new API has no bulk endpoint). Everything else goes through the
 // old-API bulk endpoint via the parent's onSave.
+//
+// `appendCategories: true` is a special rich case: we GET each location's
+// current categoryIds, append any new ones (deduped, capped at 10), then
+// PATCH back. Costs two API calls per location instead of one.
 const FIELDS = [
   { id: "hours", label: "Business Hours" },
   { id: "phone", label: "Phone" },
@@ -18,6 +22,10 @@ const FIELDS = [
   { id: "description", label: "Description", rich: true },
   { id: "featured_message", label: "Featured Message", rich: true },
   { id: "suppress_address", label: "Suppress Address", rich: true },
+  { id: "youtube_video", label: "YouTube Video", rich: true },
+  { id: "instagram_username", label: "Instagram", rich: true },
+  { id: "twitter_username", label: "Twitter / X", rich: true },
+  { id: "category_append", label: "Append Categories", rich: true, appendCategories: true },
 ];
 
 // Throttle between sequential rich-API PATCH requests.
@@ -51,13 +59,75 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
   const [featuredMessageValue, setFeaturedMessageValue] = useState("");
   const [featuredMessageUrlValue, setFeaturedMessageUrlValue] = useState("");
   const [suppressAddressValue, setSuppressAddressValue] = useState(false);
+  const [youtubeVideoValue, setYoutubeVideoValue] = useState("");
+  const [instagramUsernameValue, setInstagramUsernameValue] = useState("");
+  const [twitterUsernameValue, setTwitterUsernameValue] = useState("");
+
+  // Category append: list of category IDs the user wants to ADD to every
+  // selected location (deduped per-location server-side, capped at 10).
+  const [categoriesToAppend, setCategoriesToAppend] = useState([]);
+  const [categoryQuery, setCategoryQuery] = useState("");
+  const [categoryCatalog, setCategoryCatalog] = useState(null); // null = loading, [] = unavailable
+
+  // Country for the category catalog — peek at the first selected location.
+  // Bulk operations are brand-scoped, and brands tend to be single-country.
+  const catalogCountry = (brandLocations[0]?.countryCode || "US").toUpperCase();
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/semrush/categories?country=${encodeURIComponent(catalogCountry)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        setCategoryCatalog(Array.isArray(data.categories) ? data.categories : []);
+      })
+      .catch(() => {
+        if (!cancelled) setCategoryCatalog([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [catalogCountry]);
+
+  const categoryLabel = (id) => {
+    if (!categoryCatalog || categoryCatalog.length === 0) return id;
+    const hit = categoryCatalog.find((c) => c.id === id || c.category_id === id);
+    return hit?.full_name || hit?.name || hit?.label || id;
+  };
+
+  const filteredCategories =
+    categoryCatalog && categoryQuery
+      ? categoryCatalog
+          .filter((c) => {
+            const text = `${c.full_name || ""} ${c.name || c.label || ""} ${c.id || c.category_id || ""}`.toLowerCase();
+            return text.includes(categoryQuery.toLowerCase());
+          })
+          .slice(0, 10)
+      : [];
+
+  const addCategoryToAppend = (id) => {
+    if (!id) return;
+    if (categoriesToAppend.includes(id)) return;
+    if (categoriesToAppend.length >= 10) return;
+    setCategoriesToAppend([...categoriesToAppend, id]);
+    setCategoryQuery("");
+  };
+
+  const removeCategoryFromAppend = (id) => {
+    setCategoriesToAppend(categoriesToAppend.filter((c) => c !== id));
+  };
 
   // Progress state for rich-field bulk runs. Replaces the form while running.
   const [richProgress, setRichProgress] = useState(null);
   // { current, total, succeeded, failed, skipped, errors: [{ locationName, message }] }
 
-  const isRichField = !!FIELDS.find((f) => f.id === bulkField)?.rich;
-  const estimatedSeconds = Math.ceil((selected.size * RICH_BULK_DELAY_MS) / 1000) + selected.size; // delay + ~1s per request
+  const fieldDef = FIELDS.find((f) => f.id === bulkField);
+  const isRichField = !!fieldDef?.rich;
+  const isAppendCategories = !!fieldDef?.appendCategories;
+  // Append-categories costs 2 API calls per location (GET + PATCH) instead of 1,
+  // so bump the estimate accordingly.
+  const callsPerLoc = isAppendCategories ? 2 : 1;
+  const estimatedSeconds = Math.ceil((selected.size * RICH_BULK_DELAY_MS * callsPerLoc) / 1000) + selected.size * callsPerLoc;
 
   const toggleLocation = (id) => {
     const next = new Set(selected);
@@ -74,7 +144,10 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
   };
 
   // Map a rich-field id to the EditModal-shaped `changes` object the
-  // /api/semrush/rich/[id] PATCH route expects.
+  // /api/semrush/rich/[id] PATCH route expects. Not used for the
+  // append-categories field — that one builds its `changes` per-location
+  // inside the loop because it needs to merge with each location's current
+  // categoryIds.
   const buildRichChanges = () => {
     switch (bulkField) {
       case "description":
@@ -86,6 +159,12 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
         };
       case "suppress_address":
         return { suppressAddress: suppressAddressValue };
+      case "youtube_video":
+        return { youtubeVideo: youtubeVideoValue };
+      case "instagram_username":
+        return { instagramUsername: instagramUsernameValue };
+      case "twitter_username":
+        return { twitterUsername: twitterUsernameValue };
       default:
         return {};
     }
@@ -93,10 +172,16 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
 
   // Sequential PATCH loop for rich fields. The new API has no bulk endpoint,
   // so we fire one request per location and report progress as we go.
+  //
+  // Append-categories is a special case: for each location we first GET its
+  // current categoryIds, merge in `categoriesToAppend` (deduped, capped at
+  // 10 total), then PATCH only if anything actually changed. If nothing
+  // changed (every requested category was already present), the location
+  // counts as a "success" with no API write.
   const handleRichBulkSave = async () => {
     const ids = Array.from(selected);
-    const changes = buildRichChanges();
     const targets = brandLocations.filter((l) => ids.includes(l.id));
+    const sharedChanges = isAppendCategories ? null : buildRichChanges();
 
     setSaving(true);
     setRichProgress({ current: 0, total: targets.length, succeeded: 0, failed: 0, skipped: 0, errors: [] });
@@ -104,6 +189,7 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
     let succeeded = 0;
     let failed = 0;
     let skipped = 0;
+    let noopCount = 0; // append-only: locations already had all requested categories
     const errors = [];
 
     for (let i = 0; i < targets.length; i++) {
@@ -111,10 +197,47 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
       setRichProgress({ current: i + 1, total: targets.length, succeeded, failed, skipped, errors });
 
       try {
+        let perLocChanges = sharedChanges;
+
+        // Append-categories: read current, merge, decide whether to write
+        if (isAppendCategories) {
+          const getRes = await fetch(`/api/semrush/rich/${loc.id}`);
+          const getBody = await getRes.json();
+
+          if (!getRes.ok) {
+            failed++;
+            if (errors.length < 20) errors.push({ locationName: loc.name, message: getBody.error || `Fetch failed (HTTP ${getRes.status})` });
+            if (i < targets.length - 1) await new Promise((r) => setTimeout(r, RICH_BULK_DELAY_MS));
+            continue;
+          }
+          if (!getBody.rich) {
+            skipped++;
+            if (errors.length < 20) errors.push({ locationName: loc.name, message: getBody.reason === "no_mapping" ? "No new-API mapping (run sync)" : (getBody.message || "Rich data unavailable") });
+            if (i < targets.length - 1) await new Promise((r) => setTimeout(r, RICH_BULK_DELAY_MS));
+            continue;
+          }
+
+          const current = Array.isArray(getBody.rich.categoryIds) ? getBody.rich.categoryIds : [];
+          const merged = [...current];
+          for (const cid of categoriesToAppend) {
+            if (!merged.includes(cid) && merged.length < 10) merged.push(cid);
+          }
+
+          if (merged.length === current.length) {
+            // Already had all requested categories — nothing to write.
+            noopCount++;
+            succeeded++;
+            if (i < targets.length - 1) await new Promise((r) => setTimeout(r, RICH_BULK_DELAY_MS));
+            continue;
+          }
+
+          perLocChanges = { categoryIds: merged };
+        }
+
         const res = await fetch(`/api/semrush/rich/${loc.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ changes, locationName: loc.name }),
+          body: JSON.stringify({ changes: perLocChanges, locationName: loc.name }),
         });
         const body = await res.json();
         if (res.ok) {
@@ -136,18 +259,18 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
       }
     }
 
-    setRichProgress({ current: targets.length, total: targets.length, succeeded, failed, skipped, errors });
+    setRichProgress({ current: targets.length, total: targets.length, succeeded, failed, skipped, errors, noopCount });
     setSaving(false);
     setSaved(true);
 
-    // Fire onSave with metadata for the toast + activity log. Field value
-    // is the same changes object so the parent can show useful detail.
+    // Fire onSave with metadata for the toast + activity log. For append
+    // mode the "value" is the list of category IDs the user requested.
     onSave({
       field: bulkField,
-      value: changes,
+      value: isAppendCategories ? { categoryIdsAppended: categoriesToAppend } : sharedChanges,
       brand: brandId,
       locationIds: ids,
-      richBulk: { succeeded, failed, skipped, total: targets.length },
+      richBulk: { succeeded, failed, skipped, total: targets.length, noopCount },
     });
   };
 
@@ -425,6 +548,142 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
             </div>
           )}
 
+          {bulkField === "youtube_video" && (
+            <div className="mb-5">
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                YouTube Video URL <span style={{ color: "#555" }}>(max 150 chars, applied to every selected location)</span>
+              </label>
+              <input
+                value={youtubeVideoValue}
+                maxLength={150}
+                onChange={(e) => setYoutubeVideoValue(e.target.value)}
+                placeholder="https://youtube.com/watch?v=…"
+                className="w-full px-3 py-2 rounded-md text-xs font-mono"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+              />
+              <p className="text-[10px] mt-1" style={{ color: "#555" }}>Leave empty to clear the YouTube video from all selected locations.</p>
+            </div>
+          )}
+
+          {bulkField === "instagram_username" && (
+            <div className="mb-5">
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                Instagram Handle <span style={{ color: "#555" }}>(max 30 chars; omit the @)</span>
+              </label>
+              <input
+                value={instagramUsernameValue}
+                maxLength={30}
+                onChange={(e) => setInstagramUsernameValue(e.target.value.replace(/^@/, ""))}
+                placeholder="brandhandle"
+                className="w-full px-3 py-2 rounded-md text-xs font-mono"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+              />
+            </div>
+          )}
+
+          {bulkField === "twitter_username" && (
+            <div className="mb-5">
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                Twitter / X Handle <span style={{ color: "#555" }}>(max 15 chars; omit the @)</span>
+              </label>
+              <input
+                value={twitterUsernameValue}
+                maxLength={15}
+                onChange={(e) => setTwitterUsernameValue(e.target.value.replace(/^@/, ""))}
+                placeholder="brandhandle"
+                className="w-full px-3 py-2 rounded-md text-xs font-mono"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+              />
+            </div>
+          )}
+
+          {bulkField === "category_append" && (
+            <div className="mb-5">
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                Categories to add <span style={{ color: "#555" }}>(appended to each location's existing list, never removes)</span>
+              </label>
+
+              {/* Chips for the queue */}
+              <div className="flex flex-wrap gap-1.5 mb-2 min-h-[24px]">
+                {categoriesToAppend.length === 0 && (
+                  <span className="text-[11px] italic" style={{ color: "#555" }}>No categories queued for append</span>
+                )}
+                {categoriesToAppend.map((cid) => (
+                  <span key={cid} className="inline-flex items-center px-2 py-0.5 rounded text-[11px]" style={{ background: "#151517", border: "1px solid #2a2a2e", color: "#aaa" }}>
+                    <span className={categoryCatalog && categoryCatalog.length > 0 ? "" : "font-mono"} style={{ marginRight: "6px" }}>{categoryLabel(cid)}</span>
+                    <button type="button" onClick={() => removeCategoryFromAppend(cid)} className="hover:opacity-100 opacity-70" style={{ color: "#888" }}>×</button>
+                  </span>
+                ))}
+              </div>
+
+              {categoryCatalog === null && (
+                <div className="text-[11px]" style={{ color: "#555" }}>Loading categories ({catalogCountry})…</div>
+              )}
+
+              {categoryCatalog && categoryCatalog.length === 0 && (
+                <div className="flex gap-2">
+                  <input
+                    value={categoryQuery}
+                    onChange={(e) => setCategoryQuery(e.target.value)}
+                    placeholder="Enter category ID"
+                    className="flex-1 px-3 py-2 rounded-md text-xs font-mono"
+                    style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => addCategoryToAppend(categoryQuery.trim())}
+                    disabled={!categoryQuery.trim() || categoriesToAppend.length >= 10}
+                    className="px-3 py-2 rounded-md text-xs font-semibold"
+                    style={{ background: "#222", border: "1px solid #2a2a2e", color: "#aaa", opacity: !categoryQuery.trim() || categoriesToAppend.length >= 10 ? 0.5 : 1 }}
+                  >
+                    Add
+                  </button>
+                </div>
+              )}
+
+              {categoryCatalog && categoryCatalog.length > 0 && (
+                <div className="relative">
+                  <input
+                    value={categoryQuery}
+                    onChange={(e) => setCategoryQuery(e.target.value)}
+                    placeholder={`Search ${catalogCountry} categories…`}
+                    className="w-full px-3 py-2 rounded-md text-xs"
+                    style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                  />
+                  {categoryQuery && filteredCategories.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 mt-1 z-10 max-h-48 overflow-auto rounded-md" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+                      {filteredCategories.map((c) => {
+                        const id = c.id || c.category_id;
+                        const primary = c.full_name || c.name || c.label || id;
+                        const secondary = c.full_name && c.name && c.full_name !== c.name ? c.name : null;
+                        const already = categoriesToAppend.includes(id);
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => !already && addCategoryToAppend(id)}
+                            disabled={already}
+                            className="w-full text-left px-3 py-1.5 text-xs hover:bg-[#222]"
+                            style={{ color: already ? "#555" : "#ddd" }}
+                          >
+                            <div>{primary}</div>
+                            {secondary && <div className="text-[10px]" style={{ color: "#666" }}>{secondary}</div>}
+                            {already && <span className="text-[10px] ml-2" style={{ color: "#555" }}>(queued)</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <p className="text-[10px] mt-2" style={{ color: "#555" }}>
+                Each location can have up to 10 categories total. If a location already has one of these,
+                or is already at the 10-category cap, the extra entry will be quietly skipped — nothing is removed.
+              </p>
+            </div>
+          )}
+
           {/* Estimated-time warning for rich-field bulk runs */}
           {isRichField && !richProgress && selected.size > 0 && (
             <div className="mb-4 px-3 py-2 rounded-md text-[11px] flex items-start gap-2" style={{ background: "#2d1b00", border: "1px solid #5c3a00", color: "#fbbf24" }}>
@@ -459,7 +718,7 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
                   }}
                 />
               </div>
-              <div className="grid grid-cols-3 gap-2 text-[11px]">
+              <div className={`grid ${isAppendCategories ? "grid-cols-4" : "grid-cols-3"} gap-2 text-[11px]`}>
                 <div>
                   <div style={{ color: "#888" }}>Succeeded</div>
                   <div className="font-bold" style={{ color: "#34d399" }}>{richProgress.succeeded}</div>
@@ -472,6 +731,12 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
                   <div style={{ color: "#888" }}>Skipped (no mapping)</div>
                   <div className="font-bold" style={{ color: richProgress.skipped > 0 ? "#fbbf24" : "#555" }}>{richProgress.skipped}</div>
                 </div>
+                {isAppendCategories && (
+                  <div>
+                    <div style={{ color: "#888" }}>Already had all</div>
+                    <div className="font-bold" style={{ color: (richProgress.noopCount || 0) > 0 ? "#93c5fd" : "#555" }}>{richProgress.noopCount || 0}</div>
+                  </div>
+                )}
               </div>
               {richProgress.errors.length > 0 && (
                 <div className="mt-3 pt-3" style={{ borderTop: "1px solid #2a2a2e" }}>
@@ -526,7 +791,15 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
               {saved ? "Close" : "Cancel"}
             </button>
             {!saved && (
-              <button onClick={handleSave} disabled={saving || selected.size === 0} className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity" style={{ background: brandColor, opacity: saving || selected.size === 0 ? 0.6 : 1 }}>
+              <button
+                onClick={handleSave}
+                disabled={saving || selected.size === 0 || (isAppendCategories && categoriesToAppend.length === 0)}
+                className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
+                style={{
+                  background: brandColor,
+                  opacity: saving || selected.size === 0 || (isAppendCategories && categoriesToAppend.length === 0) ? 0.6 : 1,
+                }}
+              >
                 {saving ? `Updating ${selected.size} locations...` : `Update ${selected.size} Locations`}
               </button>
             )}

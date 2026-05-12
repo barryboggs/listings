@@ -139,9 +139,11 @@ Telemetry is per-serverless-instance, so a cold start resets to `untested`. That
 
 ### Bulk rich-field updates (Phase 4)
 
-[components/BulkModal.js](components/BulkModal.js) supports `description`, `featured_message`, and `suppress_address` as bulk-edit fields. Because the new API has no bulk endpoint, the modal **fires sequential PATCH `/api/semrush/rich/[id]` calls** with a 250ms throttle between them — same pattern as the holiday-import flow. Progress is rendered in-modal with a live counter (`X / N`, succeeded / failed / skipped) and the first 20 failure messages.
+[components/BulkModal.js](components/BulkModal.js) supports these rich fields as bulk-edit options: `description`, `featured_message`, `suppress_address`, `youtube_video`, `instagram_username`, `twitter_username`, and `category_append`. Because the new API has no bulk endpoint, the modal **fires sequential PATCH `/api/semrush/rich/[id]` calls** with a 250ms throttle between them. Progress is rendered in-modal with a live counter (`X / N`, succeeded / failed / skipped) and the first 20 failure messages.
 
-Skipped count means the location has no `semrush_new_id` mapping in `lm_shop_numbers`; the route returns 404 with `reason: "no_mapping"` and the loop continues. This is distinct from `failed`, which represents an actual API error.
+`skipped` count means the location has no `semrush_new_id` mapping in `lm_shop_numbers`; the route returns 404 with `reason: "no_mapping"` and the loop continues. Distinct from `failed`, which represents an actual API error.
+
+**Append-categories** is a special case marked by `appendCategories: true` on the FIELDS entry. It costs **two API calls per location** (GET to read current categoryIds, then PATCH to write merged list). Merge logic: union of current + requested, deduped, capped at the API's 10-category limit, current-first ordering preserved (so the existing primary stays primary). If a location already has every requested category, no PATCH fires — counted as success with a separate `noopCount` shown in the progress UI as "Already had all". The category picker pre-loads the catalog for the brand's apparent country (`brandLocations[0]?.countryCode || "US"`) and falls back to free-text input when the catalog is empty or unavailable.
 
 The parent's `handleBulkSave` in [app/dashboard/page.js](app/dashboard/page.js) detects rich-bulk by checking for a `richBulk` field on the save payload — when present, it skips the old-API bulk endpoint call entirely (the modal has already done the work) and just toasts/logs based on the supplied counts.
 
