@@ -549,6 +549,9 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
                     <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
                       Categories <span style={{ color: "#555" }}>(primary + up to 9 secondary, max 10)</span>
                     </label>
+                    <div className="text-[10px] mb-2 px-2.5 py-1.5 rounded" style={{ background: "#1a1a1d", border: "1px solid #222", color: "#888" }}>
+                      <span style={{ color: "#fbbf24" }}>ⓘ</span> Semrush's API currently only returns the primary category. Any secondary categories set in the Semrush dashboard exist but aren't visible here. Categories you add and save below will persist via the API.
+                    </div>
 
                     {/* Currently-selected chips */}
                     <div className="flex flex-wrap gap-1.5 mb-2 min-h-[24px]">

@@ -344,4 +344,62 @@ async function call(label, method, url, body, auth = "bearer") {
     console.log("\n✗ None of the probed URLs returned a categories list.");
     console.log("  Will need a Semrush support ticket or different doc source for the right path.");
   }
+
+  // 8. Categories-on-location probe.
+  //    Real-world finding: GET /locations/{id} returns only the primary
+  //    category in `category_ids` even when the location has secondaries
+  //    in the Semrush UI. Try common variations to find one that returns
+  //    all of them. Target: Maaco Kenner LA (3 categories visible in UI:
+  //    Auto Body Shop + Auto Painting + Auto Dent Removal Service).
+  console.log(`\n${pad(72, "═")}`);
+  console.log("STEP 8 — Categories-on-location probes (Maaco Kenner LA)");
+  console.log(`${pad(72, "═")}`);
+
+  const MAACO_NEW_ID = "1bee890d7ee64780a94af57d9dfb8d70";
+  const catProbes2 = [
+    { label: "baseline GET /locations/{id}", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}` },
+    { label: "?fields=*", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}?fields=*` },
+    { label: "?fields=category_ids", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}?fields=category_ids` },
+    { label: "?expand=categories", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}?expand=categories` },
+    { label: "?include=all", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}?include=all` },
+    { label: "?include=categories", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}?include=categories` },
+    { label: "?include_secondary_categories=true", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}?include_secondary_categories=true` },
+    { label: "?include_additional_categories=true", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}?include_additional_categories=true` },
+    { label: "GET /locations/{id}/categories (sub-resource)", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}/categories` },
+    { label: "GET /locations/{id}/additional-categories", url: `${NEW_BASE}/locations/${MAACO_NEW_ID}/additional-categories` },
+    { label: "list endpoint filtered to this id", url: `${NEW_BASE}/locations?location_ids=${MAACO_NEW_ID}` },
+  ];
+
+  const catCheck = [];
+  for (const p of catProbes2) {
+    const r = await call(p.label, "GET", p.url, null, "apikey");
+    // Extract category_ids from various possible shapes
+    let cats = null;
+    if (Array.isArray(r.body?.data)) {
+      cats = r.body.data[0]?.category_ids || r.body.data[0]?.categoryIds || null;
+    } else if (r.body?.data) {
+      cats = r.body.data.category_ids || r.body.data.categoryIds || null;
+    } else if (Array.isArray(r.body?.category_ids)) {
+      cats = r.body.category_ids;
+    }
+    catCheck.push({
+      probe: p.label,
+      status: r.status,
+      catCount: Array.isArray(cats) ? cats.length : (cats == null ? "—" : "?"),
+    });
+  }
+
+  console.log(`\n${pad(72, "─")}`);
+  console.log("CATEGORY-EXPANSION SUMMARY");
+  console.log(`${pad(72, "─")}`);
+  console.table(catCheck);
+
+  const expWinner = catCheck.find((c) => typeof c.catCount === "number" && c.catCount > 1);
+  if (expWinner) {
+    console.log(`\n✓ Found expansion: "${expWinner.probe}" returned ${expWinner.catCount} categories.`);
+    console.log("  Patch lib/semrush-rich.js getRichLocation() to use this variant.");
+  } else {
+    console.log("\n✗ No probed variant returned more than 1 category.");
+    console.log("  Either secondaries truly aren't exposed via the API, or the param/endpoint is something we haven't tried.");
+  }
 })();
