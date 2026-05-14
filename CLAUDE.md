@@ -147,6 +147,14 @@ Telemetry is per-serverless-instance, so a cold start resets to `untested`. That
 
 The parent's `handleBulkSave` in [app/dashboard/page.js](app/dashboard/page.js) detects rich-bulk by checking for a `richBulk` field on the save payload — when present, it skips the old-API bulk endpoint call entirely (the modal has already done the work) and just toasts/logs based on the supplied counts.
 
+### Listing Health view
+
+[app/dashboard/health/page.js](app/dashboard/health/page.js) is a triage view for locations Semrush reports as having sync errors. No new API calls — it reads `semrushErrors` straight from the same `/api/semrush/locations` response the main page already uses, filters to rows where `semrushErrors.length > 0`, and lets you sort by error count, brand, state, or name. Clicking a row opens [components/EditModal.js](components/EditModal.js) with `initialTab="errors"` so the user lands directly on the errors view.
+
+[app/dashboard/page.js](app/dashboard/page.js) carries a status-distribution row (StatusCard) above the per-brand summary: Healthy / With Errors / Processing / Temp Closed counts with percent of total. The "With Errors" tile is a link to `/dashboard/health` when its value is > 0 — the natural drilldown.
+
+`semrushErrors` shape (per location, from the deprecated API's GetLocations response): `[{ code: string, message: string, details?: [...] }]`. Errors are emitted by Semrush after a push to a downstream directory fails — they typically resolve when the offending field is corrected and the listing is re-pushed.
+
 ### Misleading API-Live badge (FIXED in Phase 4)
 
 Pre-Phase 4 the badge only checked whether `SEMRUSH_BEARER_TOKEN` was set, not whether it worked — an expired token failed silently behind a green dot. Now resolved via the health telemetry described above. If you're debugging "why am I seeing demo data," hovering the badge will show the most recent error.

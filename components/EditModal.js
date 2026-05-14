@@ -42,14 +42,14 @@ function SemrushStatusBadge({ status }) {
   );
 }
 
-export default function EditModal({ location, brands: brandsList, onClose, onSave }) {
+export default function EditModal({ location, brands: brandsList, onClose, onSave, initialTab }) {
   const brandData = (brandsList || []).find((b) => b.id === location.brand) || getBrandConfig(location.brand);
   const brandColor = brandData?.color || "#666";
 
   const [formData, setFormData] = useState({ ...location });
   const [hours, setHours] = useState(() => parseBusinessHours(location.businessHours));
   const [holidayHours, setHolidayHours] = useState(() => location.holidayHours || []);
-  const [activeTab, setActiveTab] = useState("details");
+  const [activeTab, setActiveTab] = useState(initialTab || "details");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 

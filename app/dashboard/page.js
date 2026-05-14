@@ -17,6 +17,32 @@ function StatusBadge({ status }) {
   );
 }
 
+function StatusCard({ label, value, total, color, bg, border, dot, href }) {
+  const pct = total > 0 ? Math.round((value / total) * 100) : 0;
+  const Wrapper = href ? "a" : "div";
+  return (
+    <Wrapper
+      href={href}
+      className="px-4 py-3 rounded-lg flex-1 min-w-[140px] transition-colors"
+      style={{
+        background: bg,
+        border: `1px solid ${border}`,
+        cursor: href ? "pointer" : "default",
+        textDecoration: "none",
+      }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color, fontSize: "10px" }}>{dot}</span>
+        <span className="text-[11px] font-semibold" style={{ color: "#888" }}>{label}</span>
+      </div>
+      <div className="flex items-baseline gap-2">
+        <span className="text-xl font-bold" style={{ color }}>{value}</span>
+        <span className="text-[10px]" style={{ color: "#555" }}>{pct}%</span>
+      </div>
+    </Wrapper>
+  );
+}
+
 function HoursBadge({ hoursStatus }) {
   const map = {
     standard: { icon: "●", color: "#34d399", label: "Standard" },
@@ -71,6 +97,24 @@ export default function LocationsPage() {
     next.has(id) ? next.delete(id) : next.add(id);
     if (next.size > 0) setActiveBrands(next);
   };
+
+  // Status distribution across the full location list (not filtered).
+  // Combines old-API status ("COMPLETE", "PROCESSING", "PENDING", "ERROR")
+  // with the rich semrushErrors array — anything with errors counts as
+  // unhealthy regardless of the API's status field.
+  const statusSummary = useMemo(() => {
+    const out = { total: 0, healthy: 0, processing: 0, withErrors: 0, tempClosed: 0 };
+    for (const loc of locations) {
+      out.total++;
+      const hasErrors = Array.isArray(loc.semrushErrors) && loc.semrushErrors.length > 0;
+      if (hasErrors) out.withErrors++;
+      if (loc.status === "temp_closed") out.tempClosed++;
+      const st = (loc.semrushStatus || "").toUpperCase();
+      if (st === "PROCESSING" || st === "PENDING") out.processing++;
+      if (st === "COMPLETE" && !hasErrors) out.healthy++;
+    }
+    return out;
+  }, [locations]);
 
   const filteredLocations = useMemo(() => {
     if (!activeBrands) return [];
@@ -234,7 +278,50 @@ export default function LocationsPage() {
 
       {!loading && (
         <>
-      {/* Summary row */}
+      {/* Status distribution row — aggregates across all brands */}
+      {statusSummary.total > 0 && (
+        <div className="flex gap-3 mb-4 flex-wrap">
+          <StatusCard
+            label="Healthy"
+            value={statusSummary.healthy}
+            total={statusSummary.total}
+            color="#34d399"
+            bg="#0d2818"
+            border="#2d5a2d"
+            dot="●"
+          />
+          <StatusCard
+            label="With Errors"
+            value={statusSummary.withErrors}
+            total={statusSummary.total}
+            color={statusSummary.withErrors > 0 ? "#f87171" : "#6e7681"}
+            bg="#1a0c0c"
+            border="#2d1010"
+            dot="▲"
+            href={statusSummary.withErrors > 0 ? "/dashboard/health" : undefined}
+          />
+          <StatusCard
+            label="Processing"
+            value={statusSummary.processing}
+            total={statusSummary.total}
+            color={statusSummary.processing > 0 ? "#93c5fd" : "#6e7681"}
+            bg="#0c1426"
+            border="#1e3a5f"
+            dot="◷"
+          />
+          <StatusCard
+            label="Temp Closed"
+            value={statusSummary.tempClosed}
+            total={statusSummary.total}
+            color={statusSummary.tempClosed > 0 ? "#fbbf24" : "#6e7681"}
+            bg="#1a1300"
+            border="#3a2a00"
+            dot="■"
+          />
+        </div>
+      )}
+
+      {/* Per-brand summary row */}
       <div className="flex gap-3 mb-5 flex-wrap">
         {brands.map((b) => (
           <div key={b.id} className="px-4 py-3 rounded-lg flex-1 min-w-[160px]" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
