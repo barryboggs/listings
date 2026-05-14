@@ -248,30 +248,6 @@ export default function DashboardLayout({ children }) {
                   );
                 })}
               </div>
-
-              {/* API Info */}
-              <div
-                className="mt-auto p-3 rounded-lg"
-                style={{ background: "#1a1a1d", border: "1px solid #222" }}
-              >
-                <div
-                  className="text-[10px] font-bold uppercase tracking-wider mb-2"
-                  style={{ color: "#888" }}
-                >
-                  API Endpoints
-                </div>
-                <div className="font-mono text-[11px] leading-relaxed" style={{ color: "#555" }}>
-                  <div>GetLocation</div>
-                  <div>GetLocations</div>
-                  <div>UpdateLocation</div>
-                  <div>UpdateLocations</div>
-                </div>
-                <div className="text-[10px] mt-2" style={{ color: "#444" }}>
-                  GET: 10 req/sec · PUT: 5 req/sec
-                  <br />
-                  Bulk: 5 req/min, max 50
-                </div>
-              </div>
             </div>
           </aside>
 

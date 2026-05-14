@@ -1,18 +1,27 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useUser } from "../layout";
 
 export default function ApiStatusPage() {
+  const currentUser = useUser();
   const [apiStatus, setApiStatus] = useState(null);
   const [dbStatus, setDbStatus] = useState(null);
   const [lastPing, setLastPing] = useState("Checking...");
   const [dbInitializing, setDbInitializing] = useState(false);
 
+  // Database Storage section is admin/manager only — editors and viewers
+  // don't manage storage and shouldn't see the Initialize/Reset control.
+  const canSeeDbSection = currentUser?.role === "admin" || currentUser?.role === "manager";
+
   useEffect(() => {
     fetch("/api/semrush/token")
       .then((res) => res.json())
       .then((data) => { setApiStatus(data); setLastPing("Just now"); })
-      .catch(() => { setApiStatus({ connected: false, mode: "error" }); setLastPing("Failed"); });
+      .catch(() => {
+        setApiStatus({ oldApi: { state: "failing" }, richApi: { state: "failing" }, mode: "error" });
+        setLastPing("Failed");
+      });
 
     fetch("/api/db")
       .then((res) => res.json())
@@ -35,7 +44,46 @@ export default function ApiStatusPage() {
     setDbInitializing(false);
   };
 
-  const isLive = apiStatus?.connected && apiStatus?.mode === "live";
+  // /api/semrush/token returns { oldApi, richApi, mode } as of Phase 4.
+  // Each API blob carries a `state`: healthy | failing | untested | no_token/no_key.
+  const oldApi = apiStatus?.oldApi || {};
+  const richApi = apiStatus?.richApi || {};
+
+  const STATE_DISPLAY = {
+    healthy: { label: "Healthy", color: "#34d399" },
+    failing: { label: "Failing", color: "#f87171" },
+    untested: { label: "Not Tested", color: "#93c5fd" },
+    no_token: { label: "Not Set", color: "#fbbf24" },
+    no_key: { label: "Not Set", color: "#fbbf24" },
+  };
+  const oldDisplay = STATE_DISPLAY[oldApi.state] || { label: apiStatus ? "—" : "Checking…", color: "#666" };
+  const richDisplay = STATE_DISPLAY[richApi.state] || { label: apiStatus ? "—" : "Checking…", color: "#666" };
+
+  const fmtTime = (ts) => (ts ? new Date(ts).toLocaleString() : null);
+
+  const oldDetail = !apiStatus
+    ? "Checking connection…"
+    : oldApi.state === "healthy"
+    ? oldApi.lastSuccessAt
+      ? `Last success: ${fmtTime(oldApi.lastSuccessAt)}`
+      : "Pulling from Semrush API"
+    : oldApi.state === "failing"
+    ? oldApi.lastErrorMessage || "Last call failed"
+    : oldApi.state === "untested"
+    ? "Token set — no calls made yet this session"
+    : "Set SEMRUSH_BEARER_TOKEN in .env.local";
+
+  const richDetail = !apiStatus
+    ? "Checking connection…"
+    : richApi.state === "healthy"
+    ? richApi.lastSuccessAt
+      ? `Last success: ${fmtTime(richApi.lastSuccessAt)}`
+      : "Rich fields available"
+    : richApi.state === "failing"
+    ? richApi.lastErrorMessage || "Last call failed"
+    : richApi.state === "untested"
+    ? "API key set — no calls made yet this session"
+    : "Set SEMRUSH_API_KEY in .env.local";
 
   const endpoints = [
     { method: "GET", path: "/external/locations/:locationId", rate: "10 req/sec", desc: "Get a single location by ID", status: "ok" },
@@ -58,8 +106,8 @@ export default function ApiStatusPage() {
       {/* Status cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {[
-          { label: "Bearer Token", value: isLive ? "Active" : "Not Set", detail: isLive && apiStatus?.expiresAt ? `Expires ${new Date(apiStatus.expiresAt).toLocaleDateString()}` : "Set SEMRUSH_BEARER_TOKEN in .env.local", color: isLive ? "#34d399" : "#fbbf24" },
-          { label: "API Mode", value: isLive ? "Live" : "Demo", detail: isLive ? "Pulling from Semrush API" : "Using demo data", color: isLive ? "#34d399" : "#fbbf24" },
+          { label: "Old API (Bearer)", value: oldDisplay.label, detail: oldDetail, color: oldDisplay.color },
+          { label: "Rich API (Apikey)", value: richDisplay.label, detail: richDetail, color: richDisplay.color },
           { label: "Last Check", value: lastPing, detail: "Polled every 60 seconds", color: apiStatus ? "#34d399" : "#f87171" },
           { label: "Database", value: dbStatus?.hasPostgres ? "Postgres" : "Memory", detail: dbStatus?.hasPostgres ? "Vercel Postgres connected" : "In-memory (resets on cold start)", color: dbStatus?.hasPostgres ? "#34d399" : "#fbbf24" },
         ].map((card) => (
@@ -76,7 +124,9 @@ export default function ApiStatusPage() {
         ))}
       </div>
 
-      {/* Database section */}
+      {/* Database section — admin/manager only (storage internals + the
+          Initialize/Reset Database control aren't relevant to editors/viewers) */}
+      {canSeeDbSection && (
       <div className="rounded-xl p-5 mb-6" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
         <h3 className="text-xs font-bold uppercase tracking-wider mb-4" style={{ color: "#aaa" }}>
           Database Storage
@@ -123,6 +173,7 @@ export default function ApiStatusPage() {
           </div>
         )}
       </div>
+      )}
 
       {/* Endpoints */}
       <div className="rounded-xl p-5 mb-6" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
@@ -212,25 +263,37 @@ export default function ApiStatusPage() {
                 <span style={{ color: "#555" }}>↓</span>
               </div>
 
-              {/* Token layer */}
+              {/* Credentials layer — two server-side API surfaces */}
               <div className="flex items-center gap-3">
-                <div className="px-3 py-2 rounded-md text-center" style={{ background: "#fbbf2420", border: "1px solid #fbbf2440", color: "#fbbf24", minWidth: "140px" }}>
-                  <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">Bearer Token</div>
-                  <div className="text-[10px] font-normal" style={{ color: "#fbbf24aa" }}>Server-side only</div>
+                <div className="flex gap-2" style={{ minWidth: "290px" }}>
+                  <div className="px-3 py-2 rounded-md text-center flex-1" style={{ background: "#fbbf2420", border: "1px solid #fbbf2440", color: "#fbbf24" }}>
+                    <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">Bearer Token</div>
+                    <div className="text-[10px] font-normal" style={{ color: "#fbbf24aa" }}>Old API · OAuth</div>
+                  </div>
+                  <div className="px-3 py-2 rounded-md text-center flex-1" style={{ background: "#6ee7b720", border: "1px solid #6ee7b740", color: "#6ee7b7" }}>
+                    <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">Apikey</div>
+                    <div className="text-[10px] font-normal" style={{ color: "#6ee7b7aa" }}>Rich API · key</div>
+                  </div>
                 </div>
                 <div className="flex-1 border-t border-dashed" style={{ borderColor: "#333" }} />
-                <span className="text-[10px]" style={{ color: "#555" }}>Single API credential</span>
+                <span className="text-[10px]" style={{ color: "#555" }}>Server-side only · 2 credentials</span>
               </div>
 
               <div className="flex justify-center">
                 <span style={{ color: "#555" }}>↓</span>
               </div>
 
-              {/* Semrush layer */}
+              {/* Semrush layer — two Listing Management API surfaces */}
               <div className="flex items-center gap-3">
-                <div className="px-3 py-2 rounded-md text-center" style={{ background: "#f9731620", border: "1px solid #f9731640", color: "#f97316", minWidth: "140px" }}>
-                  <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">Semrush API</div>
-                  <div className="text-[10px] font-normal" style={{ color: "#f97316aa" }}>Listing Management</div>
+                <div className="flex gap-2" style={{ minWidth: "290px" }}>
+                  <div className="px-3 py-2 rounded-md text-center flex-1" style={{ background: "#f9731620", border: "1px solid #f9731640", color: "#f97316" }}>
+                    <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">v4-raw API</div>
+                    <div className="text-[10px] font-normal" style={{ color: "#f97316aa" }}>Deprecated · bulk + CRUD</div>
+                  </div>
+                  <div className="px-3 py-2 rounded-md text-center flex-1" style={{ background: "#f9731620", border: "1px solid #f9731640", color: "#f97316" }}>
+                    <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">v4/local API</div>
+                    <div className="text-[10px] font-normal" style={{ color: "#f97316aa" }}>Rich fields · no bulk</div>
+                  </div>
                 </div>
                 <div className="flex-1 border-t border-dashed" style={{ borderColor: "#333" }} />
                 <span className="text-[10px]" style={{ color: "#555" }}>→ 70+ directories</span>
