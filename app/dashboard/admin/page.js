@@ -4,6 +4,17 @@ import { useState, useEffect } from "react";
 import { useUser } from "../layout";
 import { ROLES, getBrandConfig } from "@/lib/data";
 
+// Readable temp-password generator — excludes ambiguous chars (0/O, 1/l/I)
+// so passwords are easy to read aloud or copy without confusion.
+function generatePassword() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  let pw = "";
+  for (let i = 0; i < 10; i++) {
+    pw += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return pw;
+}
+
 function UserRow({ user, onEdit, onDelete }) {
   const roleColors = {
     admin: { bg: "#a78bfa20", color: "#a78bfa" },
@@ -50,6 +61,10 @@ function UserRow({ user, onEdit, onDelete }) {
 function UserModal({ user, brands, onClose, onSave, saving }) {
   const isNew = !user;
   const [form, setForm] = useState(user || { name: "", email: "", password: "", role: "editor", initials: "", brands: [] });
+  // Edit mode: password reset is opt-in — the field only appears once the
+  // admin clicks "Reset Password", and form.password stays undefined until
+  // then so updateUser leaves the existing password untouched.
+  const [showPasswordReset, setShowPasswordReset] = useState(false);
   const isAllBrands = form.brands.includes("*");
 
   const toggleAllBrands = () => setForm({ ...form, brands: isAllBrands ? [] : ["*"] });
@@ -67,6 +82,16 @@ function UserModal({ user, brands, onClose, onSave, saving }) {
   };
 
   const hasValidBrands = isAllBrands || form.brands.length > 0;
+  // New users must have a password. Edit mode: a password is only required
+  // if the admin opened the reset field (showPasswordReset) — otherwise it
+  // stays undefined and the existing password is left untouched.
+  const needsPassword = isNew || showPasswordReset;
+  const saveDisabled =
+    saving ||
+    !form.name ||
+    !form.email ||
+    !hasValidBrands ||
+    (needsPassword && !form.password);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}>
@@ -90,9 +115,78 @@ function UserModal({ user, brands, onClose, onSave, saving }) {
           </div>
           {isNew && (
             <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>Temporary Password</label>
-              <input type="text" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Set initial password" className="w-full px-3 py-2.5 rounded-md text-sm" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }} />
-              <p className="text-[11px] mt-1" style={{ color: "#555" }}>User can change this after first login (in production)</p>
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+                Temporary Password <span style={{ color: "#f87171" }}>*</span>
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={form.password || ""}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  placeholder="Set or generate an initial password"
+                  className="flex-1 px-3 py-2.5 rounded-md text-sm font-mono"
+                  style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, password: generatePassword() })}
+                  className="px-3 py-2.5 rounded-md text-xs font-semibold whitespace-nowrap"
+                  style={{ background: "#222", border: "1px solid #2a2a2e", color: "#a78bfa" }}
+                >
+                  Generate
+                </button>
+              </div>
+              <p className="text-[11px] mt-1" style={{ color: "#555" }}>
+                Required. You'll see this password after the user is created — share it with them then.
+              </p>
+            </div>
+          )}
+
+          {!isNew && (
+            <div>
+              <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>Password</label>
+              {!showPasswordReset ? (
+                <button
+                  type="button"
+                  onClick={() => { setShowPasswordReset(true); setForm({ ...form, password: "" }); }}
+                  className="px-3 py-2 rounded-md text-xs font-semibold"
+                  style={{ background: "#222", border: "1px solid #2a2a2e", color: "#aaa" }}
+                >
+                  Reset Password
+                </button>
+              ) : (
+                <>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={form.password || ""}
+                      onChange={(e) => setForm({ ...form, password: e.target.value })}
+                      placeholder="New password"
+                      className="flex-1 px-3 py-2.5 rounded-md text-sm font-mono"
+                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, password: generatePassword() })}
+                      className="px-3 py-2.5 rounded-md text-xs font-semibold whitespace-nowrap"
+                      style={{ background: "#222", border: "1px solid #2a2a2e", color: "#a78bfa" }}
+                    >
+                      Generate
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setShowPasswordReset(false); setForm({ ...form, password: undefined }); }}
+                      className="px-3 py-2.5 rounded-md text-xs font-semibold"
+                      style={{ background: "#222", border: "1px solid #2a2a2e", color: "#888" }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <p className="text-[11px] mt-1" style={{ color: "#555" }}>
+                    Leave the reset cancelled to keep the current password. You'll see the new one after saving.
+                  </p>
+                </>
+              )}
             </div>
           )}
           <div>
@@ -130,7 +224,12 @@ function UserModal({ user, brands, onClose, onSave, saving }) {
 
         <div className="px-6 py-4 flex justify-end gap-2" style={{ borderTop: "1px solid #2a2a2e" }}>
           <button onClick={onClose} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#222", border: "1px solid #333", color: "#aaa" }}>Cancel</button>
-          <button onClick={() => onSave(form)} disabled={saving || !form.name || !form.email || !hasValidBrands} className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity" style={{ background: "#a78bfa", opacity: saving || !form.name || !form.email || !hasValidBrands ? 0.5 : 1 }}>
+          <button
+            onClick={() => onSave(form)}
+            disabled={saveDisabled}
+            className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
+            style={{ background: "#a78bfa", opacity: saveDisabled ? 0.5 : 1 }}
+          >
             {saving ? "Saving..." : isNew ? "Add User" : "Save Changes"}
           </button>
         </div>
@@ -158,6 +257,58 @@ function DeleteModal({ user, onClose, onConfirm, deleting }) {
   );
 }
 
+// Shown once after a user is created or has their password reset. The
+// password is only available right here — it's never returned by the
+// users list endpoint — so the admin has to copy it now.
+function CredentialModal({ credential, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(credential.password);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard API can fail on insecure contexts — the password is
+      // still visible on screen for manual copy
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-[55] flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}>
+      <div className="animate-fade-scale w-full max-w-sm rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #2a2a2e" }}>
+        <div className="px-6 py-5">
+          <span className="text-[11px] font-semibold uppercase tracking-wider block mb-1" style={{ color: "#34d399" }}>
+            {credential.reset ? "Password Reset" : "User Created"}
+          </span>
+          <h3 className="text-base font-semibold text-white mb-1">{credential.name}</h3>
+          <p className="text-xs mb-4" style={{ color: "#888" }}>{credential.email}</p>
+
+          <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
+            {credential.reset ? "New Password" : "Temporary Password"}
+          </label>
+          <div className="flex gap-2">
+            <div className="flex-1 px-3 py-2.5 rounded-md text-sm font-mono" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#e8e8e8" }}>
+              {credential.password}
+            </div>
+            <button
+              onClick={copy}
+              className="px-3 py-2.5 rounded-md text-xs font-semibold whitespace-nowrap"
+              style={{ background: copied ? "#1a2e1a" : "#222", border: `1px solid ${copied ? "#2d5a2d" : "#2a2a2e"}`, color: copied ? "#6ee7b7" : "#a78bfa" }}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p className="text-[11px] mt-3 px-3 py-2 rounded" style={{ background: "#2d1b00", border: "1px solid #5c3a00", color: "#fbbf24" }}>
+            Share this with {credential.name.split(" ")[0]} now — it won't be shown again.
+          </p>
+        </div>
+        <div className="px-6 py-4 flex justify-end" style={{ borderTop: "1px solid #2a2a2e" }}>
+          <button onClick={onClose} className="px-5 py-2 rounded-md text-xs font-semibold text-white" style={{ background: "#a78bfa" }}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AdminPage() {
   const currentUser = useUser();
   const [users, setUsers] = useState([]);
@@ -169,6 +320,7 @@ export default function AdminPage() {
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
+  const [createdCredential, setCreatedCredential] = useState(null);
 
   // Fetch users and brands on mount
   useEffect(() => {
@@ -223,7 +375,9 @@ export default function AdminPage() {
         const data = await res.json();
         if (res.ok) {
           setUsers([...users, data.user]);
-          showToast(`${data.user.name} added to the team`);
+          // Surface the password the admin just set so it can be copied
+          // and handed off — it's never retrievable again after this.
+          setCreatedCredential({ name: data.user.name, email: data.user.email, password: userData.password });
           logActivity("Added user", `${data.user.name} (${data.user.email}) — role: ${data.user.role}`);
         } else {
           showToast(`Error: ${data.error}`);
@@ -237,8 +391,14 @@ export default function AdminPage() {
         const data = await res.json();
         if (res.ok) {
           setUsers(users.map((u) => (u.id === editingUser.id ? data.user : u)));
-          showToast(`${data.user.name} updated`);
-          logActivity("Updated user", `${data.user.name} (${data.user.email}) — role: ${data.user.role}`);
+          // If the admin reset the password, show the new one once.
+          if (userData.password) {
+            setCreatedCredential({ name: data.user.name, email: data.user.email, password: userData.password, reset: true });
+            logActivity("Reset user password", `${data.user.name} (${data.user.email})`);
+          } else {
+            showToast(`${data.user.name} updated`);
+            logActivity("Updated user", `${data.user.name} (${data.user.email}) — role: ${data.user.role}`);
+          }
         } else {
           showToast(`Error: ${data.error}`);
         }
@@ -398,6 +558,7 @@ export default function AdminPage() {
 
       {editingUser !== undefined && <UserModal user={editingUser} brands={brands} onClose={() => setEditingUser(undefined)} onSave={handleSave} saving={saving} />}
       {deletingUser && <DeleteModal user={deletingUser} onClose={() => setDeletingUser(null)} onConfirm={handleDelete} deleting={saving} />}
+      {createdCredential && <CredentialModal credential={createdCredential} onClose={() => setCreatedCredential(null)} />}
     </>
   );
 }
