@@ -17,23 +17,28 @@ function StatusBadge({ status }) {
   );
 }
 
-function StatusCard({ label, value, total, color, bg, border, dot, href }) {
+function StatusCard({ label, value, total, color, bg, border, dot, href, onClick, active }) {
   const pct = total > 0 ? Math.round((value / total) * 100) : 0;
-  const Wrapper = href ? "a" : "div";
+  const clickable = !!href || !!onClick;
+  const Wrapper = href ? "a" : onClick ? "button" : "div";
   return (
     <Wrapper
       href={href}
-      className="px-4 py-3 rounded-lg flex-1 min-w-[140px] transition-colors"
+      onClick={onClick}
+      type={onClick && !href ? "button" : undefined}
+      className="px-4 py-3 rounded-lg flex-1 min-w-[140px] transition-colors text-left"
       style={{
         background: bg,
-        border: `1px solid ${border}`,
-        cursor: href ? "pointer" : "default",
+        border: `1px solid ${active ? color : border}`,
+        boxShadow: active ? `inset 0 0 0 1px ${color}` : "none",
+        cursor: clickable ? "pointer" : "default",
         textDecoration: "none",
       }}
     >
       <div className="flex items-center gap-2 mb-1">
         <span style={{ color, fontSize: "10px" }}>{dot}</span>
         <span className="text-[11px] font-semibold" style={{ color: "#888" }}>{label}</span>
+        {active && <span className="ml-auto text-[10px]" style={{ color }}>● filtering</span>}
       </div>
       <div className="flex items-baseline gap-2">
         <span className="text-xl font-bold" style={{ color }}>{value}</span>
@@ -61,6 +66,7 @@ function HoursBadge({ hoursStatus }) {
 export default function LocationsPage() {
   const [activeBrands, setActiveBrands] = useState(null); // null until loaded
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState(null); // null | "temp_closed" — driven by the status cards
   const [editingLocation, setEditingLocation] = useState(null);
   const [bulkBrand, setBulkBrand] = useState(null);
   const [toast, setToast] = useState(null);
@@ -121,6 +127,7 @@ export default function LocationsPage() {
     return locations.filter(
       (loc) =>
         activeBrands.has(loc.brand) &&
+        (statusFilter === null || loc.status === statusFilter) &&
         (search === "" ||
           loc.name.toLowerCase().includes(search.toLowerCase()) ||
           loc.city.toLowerCase().includes(search.toLowerCase()) ||
@@ -128,7 +135,7 @@ export default function LocationsPage() {
           loc.zip.includes(search) ||
           (loc.shopId && loc.shopId.toString().includes(search)))
     );
-  }, [activeBrands, search, locations]);
+  }, [activeBrands, search, locations, statusFilter]);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -317,6 +324,12 @@ export default function LocationsPage() {
             bg="#1a1300"
             border="#3a2a00"
             dot="■"
+            onClick={
+              statusSummary.tempClosed > 0
+                ? () => setStatusFilter(statusFilter === "temp_closed" ? null : "temp_closed")
+                : undefined
+            }
+            active={statusFilter === "temp_closed"}
           />
         </div>
       )}
@@ -379,6 +392,26 @@ export default function LocationsPage() {
           </button>
         ))}
       </div>
+
+      {/* Active status filter chip */}
+      {statusFilter === "temp_closed" && (
+        <div className="flex items-center gap-2 mb-3">
+          <span
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-[11px] font-semibold"
+            style={{ background: "#1a1300", border: "1px solid #5c3a00", color: "#fbbf24" }}
+          >
+            <span className="text-[10px]">■</span>
+            Showing temporarily closed locations only
+            <button
+              onClick={() => setStatusFilter(null)}
+              className="ml-1 hover:opacity-100 opacity-70"
+              style={{ color: "#fbbf24" }}
+            >
+              ×
+            </button>
+          </span>
+        </div>
+      )}
 
       {/* Locations table */}
       <div className="rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
