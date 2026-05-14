@@ -105,19 +105,24 @@ export default function LocationsPage() {
   };
 
   // Status distribution across the full location list (not filtered).
-  // Combines old-API status ("COMPLETE", "PROCESSING", "PENDING", "ERROR")
-  // with the rich semrushErrors array — anything with errors counts as
-  // unhealthy regardless of the API's status field.
+  // "Healthy" is defined by absence of problems — no sync errors and not
+  // temp-closed — rather than by matching a status string. The deprecated
+  // API doesn't return a usable status field (semrushStatus is null for
+  // this account), so there's no "processing" bucket here; processing
+  // state only exists on the new API's location_status, which we don't
+  // have for the full list. The problem buckets can overlap (a temp-closed
+  // location can also have errors), so the counts won't necessarily sum to
+  // total; that's expected for an at-a-glance summary.
   const statusSummary = useMemo(() => {
-    const out = { total: 0, healthy: 0, processing: 0, withErrors: 0, tempClosed: 0 };
+    const out = { total: 0, healthy: 0, withErrors: 0, tempClosed: 0 };
     for (const loc of locations) {
       out.total++;
       const hasErrors = Array.isArray(loc.semrushErrors) && loc.semrushErrors.length > 0;
+      const isTempClosed = loc.status === "temp_closed";
+
       if (hasErrors) out.withErrors++;
-      if (loc.status === "temp_closed") out.tempClosed++;
-      const st = (loc.semrushStatus || "").toUpperCase();
-      if (st === "PROCESSING" || st === "PENDING") out.processing++;
-      if (st === "COMPLETE" && !hasErrors) out.healthy++;
+      if (isTempClosed) out.tempClosed++;
+      if (!hasErrors && !isTempClosed) out.healthy++;
     }
     return out;
   }, [locations]);
@@ -306,15 +311,6 @@ export default function LocationsPage() {
             border="#2d1010"
             dot="▲"
             href={statusSummary.withErrors > 0 ? "/dashboard/health" : undefined}
-          />
-          <StatusCard
-            label="Processing"
-            value={statusSummary.processing}
-            total={statusSummary.total}
-            color={statusSummary.processing > 0 ? "#93c5fd" : "#6e7681"}
-            bg="#0c1426"
-            border="#1e3a5f"
-            dot="◷"
           />
           <StatusCard
             label="Temp Closed"
