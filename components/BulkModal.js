@@ -766,6 +766,9 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
             {brandLocations.map((loc) => (
               <label key={loc.id} className="flex items-center gap-2 px-2.5 py-2 rounded cursor-pointer" style={{ background: selected.has(loc.id) ? "#1c1c1f" : "transparent", border: `1px solid ${selected.has(loc.id) ? "#2a2a2e" : "transparent"}` }}>
                 <input type="checkbox" checked={selected.has(loc.id)} onChange={() => toggleLocation(loc.id)} style={{ accentColor: brandColor }} />
+                <span className="text-[10px] font-mono font-semibold w-12 flex-shrink-0" style={{ color: loc.shopId ? "#93c5fd" : "#444" }}>
+                  {loc.shopId || "—"}
+                </span>
                 <span className="text-xs" style={{ color: selected.has(loc.id) ? "#ddd" : "#666" }}>{loc.name}</span>
                 <span className="ml-auto text-[10px]" style={{ color: "#555" }}>{loc.city}, {loc.state}</span>
               </label>
