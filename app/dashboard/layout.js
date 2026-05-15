@@ -117,6 +117,12 @@ export default function DashboardLayout({ children }) {
       .then((data) => {
         if (data.user) {
           setUser(data.user);
+          // Force a password change if the admin-set temp password is
+          // still in place. The /dashboard/account page handles the flow;
+          // we route there from anywhere else.
+          if (data.user.passwordTemp && pathname !== "/dashboard/account") {
+            router.replace("/dashboard/account");
+          }
         } else {
           router.push("/login");
         }
@@ -198,9 +204,21 @@ export default function DashboardLayout({ children }) {
                 <div className="text-xs font-semibold text-white">{user.name}</div>
                 <div className="text-xs capitalize" style={{ color: "#666" }}>{user.role}</div>
               </div>
+              <a
+                href="/dashboard/account"
+                className="ml-2 text-xs px-2.5 py-1 rounded"
+                style={{
+                  background: pathname === "/dashboard/account" ? "#1c1c1f" : "transparent",
+                  border: "1px solid #2a2a2e",
+                  color: pathname === "/dashboard/account" ? "#e8e8e8" : "#888",
+                  textDecoration: "none",
+                }}
+              >
+                Account
+              </a>
               <button
                 onClick={handleLogout}
-                className="ml-2 text-xs px-2.5 py-1 rounded"
+                className="text-xs px-2.5 py-1 rounded"
                 style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#888" }}
               >
                 Sign Out

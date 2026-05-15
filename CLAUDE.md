@@ -147,6 +147,12 @@ Telemetry is per-serverless-instance, so a cold start resets to `untested`. That
 
 The parent's `handleBulkSave` in [app/dashboard/page.js](app/dashboard/page.js) detects rich-bulk by checking for a `richBulk` field on the save payload — when present, it skips the old-API bulk endpoint call entirely (the modal has already done the work) and just toasts/logs based on the supplied counts.
 
+### Password management
+
+Admin-set passwords (create or reset via [app/dashboard/admin/page.js](app/dashboard/admin/page.js)) mark `lm_users.password_temp = TRUE`. On the user's next login, [app/dashboard/layout.js](app/dashboard/layout.js) reads `passwordTemp` from `/api/auth/me` and redirects them to `/dashboard/account`, where the page renders in "forced" mode (no current-password field — they just authenticated with it). On submit, `PATCH /api/account/password` calls `updateOwnPassword()` which sets the new password and clears `password_temp`, then a full `window.location.href` reload refreshes the layout's user state. Voluntary password changes (from the header "Account" link) require the current password and don't trigger a hard reload.
+
+The schema migration (`ALTER TABLE lm_users ADD COLUMN IF NOT EXISTS password_temp`) lives in `initDatabase()` and is called defensively by `/api/users` POST/PUT and `/api/account/password` PATCH, so the column is guaranteed present before any write that references it.
+
 ### Listing Health view
 
 [app/dashboard/health/page.js](app/dashboard/health/page.js) is a triage view for locations Semrush reports as having sync errors. No new API calls — it reads `semrushErrors` straight from the same `/api/semrush/locations` response the main page already uses, filters to rows where `semrushErrors.length > 0`, and lets you sort by error count, brand, state, or name. Clicking a row opens [components/EditModal.js](components/EditModal.js) with `initialTab="errors"` so the user lands directly on the errors view.

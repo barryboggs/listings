@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
-import { getUsers, createUser, updateUser, deleteUser } from "@/lib/db";
+import { getUsers, createUser, updateUser, deleteUser, initDatabase } from "@/lib/db";
 
 export async function GET(request) {
   const token = request.cookies.get("auth-token")?.value;
@@ -18,6 +18,9 @@ export async function POST(request) {
   const user = await verifyToken(token);
   if (!user || user.role !== "admin") return NextResponse.json({ error: "Admin access required" }, { status: 403 });
 
+  // Ensure password_temp column exists before INSERT references it.
+  await initDatabase();
+
   try {
     const body = await request.json();
     const newUser = await createUser(body);
@@ -32,6 +35,9 @@ export async function PUT(request) {
   if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const user = await verifyToken(token);
   if (!user || user.role !== "admin") return NextResponse.json({ error: "Admin access required" }, { status: 403 });
+
+  // Ensure password_temp column exists before UPDATE references it.
+  await initDatabase();
 
   try {
     const body = await request.json();
