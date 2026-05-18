@@ -1046,13 +1046,23 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
                     Failures (first {Math.min(batchProgress.errors.length, 20)})
                   </div>
                   <div className="space-y-0.5 max-h-40 overflow-auto">
-                    {batchProgress.errors.slice(0, 20).map((e, i) => (
-                      <div key={i} className="text-[10px] flex gap-2 flex-wrap">
-                        <span style={{ color: "#555" }}>b{e.batch}</span>
-                        {e.locationId && <span className="font-mono" style={{ color: "#93c5fd" }}>#{e.locationId}</span>}
-                        <span className="font-mono flex-1" style={{ color: "#f87171" }}>{e.message}</span>
-                      </div>
-                    ))}
+                    {batchProgress.errors.slice(0, 20).map((e, i) => {
+                      // Semrush returns its internal location ID (UUID-ish);
+                      // map it back to our app data for the shop number + name
+                      // so the user can identify the failing shop at a glance.
+                      const loc = e.locationId ? brandLocations.find((l) => l.id === e.locationId) : null;
+                      return (
+                        <div key={i} className="text-[10px] flex gap-2 flex-wrap items-baseline" title={e.locationId || ""}>
+                          <span style={{ color: "#555" }}>b{e.batch}</span>
+                          {loc?.shopId && <span className="font-mono" style={{ color: "#93c5fd" }}>#{loc.shopId}</span>}
+                          {loc?.name && <span style={{ color: "#ddd" }}>{loc.name}</span>}
+                          {!loc && e.locationId && (
+                            <span className="font-mono" style={{ color: "#666" }}>{e.locationId.slice(0, 8)}…</span>
+                          )}
+                          <span className="font-mono flex-1 min-w-0" style={{ color: "#f87171" }}>{e.message}</span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
