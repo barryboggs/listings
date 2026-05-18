@@ -245,13 +245,39 @@ export default function LocationsPage() {
           "Bulk update",
           `${brandName} — ${data.locationIds.length} locations`,
           data.brand,
-          `Field: ${data.field}`
+          data.field === "phone_per_location"
+            ? `Field: per-location phone (${data.locationIds.length} unique numbers)`
+            : `Field: ${data.field}`
         );
         fetchLocations();
       } else {
-        showToast(`Bulk update had ${result.failed} errors`);
+        // Three failure shapes can land here:
+        //   1. Validation error (400)         → { error: "..." }                 (no `failed`)
+        //   2. Upstream Semrush exception      → { success: false, error: "..." } (no `failed`)
+        //   3. Partial bulk fail               → { failed: N, errors: [{ locationId, error, details: [...] }] }
+        // Semrush's per-item "error" message is often generic ("invalid data provided")
+        // while `details[]` carries the field-level reason — extract both.
+        console.error("Bulk update failed:", result);
+
+        const firstErr = result.errors?.[0];
+        const firstMsg = firstErr?.error;
+        const firstDetail = Array.isArray(firstErr?.details) && firstErr.details.length > 0
+          ? firstErr.details.map((d) => d.message || d.code).filter(Boolean).join("; ")
+          : null;
+        const firstCombined = firstMsg
+          ? firstDetail
+            ? `${firstMsg} (${firstDetail})`
+            : firstMsg
+          : null;
+
+        const detail =
+          result.error ||
+          (firstCombined ? `${result.failed} failed — ${firstCombined}` : null) ||
+          (typeof result.failed === "number" ? `${result.failed} of ${data.locationIds.length} failed` : "unknown error (see console)");
+        showToast(`Bulk update failed — ${detail}`);
       }
-    } catch {
+    } catch (e) {
+      console.error("Bulk update network error:", e);
       showToast("Network error — please try again");
     }
   };

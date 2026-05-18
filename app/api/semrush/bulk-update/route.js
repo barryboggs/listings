@@ -6,6 +6,18 @@ import {
   toSemrushFormat,
 } from "@/lib/semrush";
 
+// Semrush requires E.164 ("+<digits>"). Mirrors the client-side normalizer
+// in components/BulkModal.js — kept here too so any caller (CSV import,
+// future routes, hand-rolled curl) gets the same lenient input handling.
+function normalizePhone(input) {
+  if (!input) return "";
+  const trimmed = String(input).trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("+")) return "+" + trimmed.slice(1).replace(/\D/g, "");
+  const digits = trimmed.replace(/\D/g, "");
+  return digits ? `+${digits}` : "";
+}
+
 export async function PUT(request) {
   // Verify auth
   const token = request.cookies.get("auth-token")?.value;
@@ -29,12 +41,13 @@ export async function PUT(request) {
   // Expected shape from frontend:
   // {
   //   locationIds: ["id1", "id2", ...],
-  //   field: "hours" | "phone" | "website" | "temp_closure" | "holiday_hours",
-  //   value: { ... }
+  //   field: "hours" | "phone" | "phone_per_location" | "website" | "temp_closure" | "holiday_hours",
+  //   value: { ... }                                  // shared value (most fields)
+  //   perLocationValues: { id: newPhone }             // phone_per_location only
   //   existingLocations: [{ id, name, city, address, phone, ... }]  // current data for required fields
   // }
 
-  const { locationIds, field, value, existingLocations } = body;
+  const { locationIds, field, value, perLocationValues, existingLocations } = body;
 
   if (!locationIds || !Array.isArray(locationIds) || locationIds.length === 0) {
     return NextResponse.json(
@@ -48,6 +61,22 @@ export async function PUT(request) {
       { error: "Maximum 50 locations per bulk update (Semrush API limit)" },
       { status: 400 }
     );
+  }
+
+  if (field === "phone_per_location") {
+    if (!perLocationValues || typeof perLocationValues !== "object") {
+      return NextResponse.json(
+        { error: "perLocationValues map is required for phone_per_location" },
+        { status: 400 }
+      );
+    }
+    const missing = locationIds.filter((id) => !perLocationValues[id]);
+    if (missing.length > 0) {
+      return NextResponse.json(
+        { error: `Missing phone value for ${missing.length} location(s)` },
+        { status: 400 }
+      );
+    }
   }
 
   const { hasToken } = getTokenStatus();
@@ -76,10 +105,19 @@ export async function PUT(request) {
     const locations = locationIds.map((id) => {
       const existing = existingMap.get(id) || {};
 
-      // Build the update — start with existing required fields, then overlay the change
+      // Build the update — start with existing required fields, then overlay the change.
+      //
+      // We include zip + state even though CLAUDE.md previously said only
+      // name/city/address/phone were required. Empirically Semrush also
+      // validates `zip` as part of the bulk update — sending nothing fails
+      // a US location with "Zip code has invalid US format" because their
+      // regex check treats empty as non-matching. Sending the existing
+      // value satisfies the validator without changing anything.
       let updateData = {
         name: existing.name || existing.locationName || "",
         city: existing.city || "",
+        state: existing.state || "",
+        zip: existing.zip || "",
         address: existing.address || "",
         phone: existing.phone || "",
       };
@@ -90,7 +128,11 @@ export async function PUT(request) {
           updateData.businessHours = value;
           break;
         case "phone":
-          updateData.phone = typeof value === "string" ? value : value?.phone || "";
+          updateData.phone = normalizePhone(typeof value === "string" ? value : value?.phone || "");
+          break;
+        case "phone_per_location":
+          // Each location gets its own new phone from the perLocationValues map.
+          updateData.phone = normalizePhone(perLocationValues[id]);
           break;
         case "website":
           updateData.website = typeof value === "string" ? value : value?.website || "";
@@ -129,8 +171,23 @@ export async function PUT(request) {
       .map((r) => ({
         locationId: r.locationId,
         error: r.error?.message || "Unknown error",
+        code: r.error?.code,
         details: r.error?.details || [],
       }));
+
+    // If anything failed, log the exact request payload + Semrush response so
+    // a developer can see which field Semrush rejected (the per-item "error"
+    // message is often the generic "invalid data provided"; `details[]` may
+    // pin it to a specific field, or the payload diff may reveal the cause).
+    if (failed > 0) {
+      console.error("[bulk-update] Semrush rejected items:", JSON.stringify({
+        field,
+        failed,
+        updated,
+        firstFailedItem: locations.find((p) => errors.some((e) => e.locationId === p.id)),
+        errors,
+      }, null, 2));
+    }
 
     return NextResponse.json({
       success: failed === 0,
@@ -144,6 +201,7 @@ export async function PUT(request) {
     });
   } catch (error) {
     console.error("Semrush bulk update error:", error.message);
+    console.error("[bulk-update] Exception during call. Field:", field, "locationIds:", locationIds.length);
     return NextResponse.json(
       {
         success: false,

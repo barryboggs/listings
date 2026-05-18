@@ -19,7 +19,9 @@ Required env vars (see `.env.example`):
 - `SEMRUSH_API_KEY` — optional. Enables the "rich" fields (description, categories, coordinates, social) via the newer local API. This is a **different credential type** from the Bearer token above — pulled from the Semrush Subscription Info page, not OAuth. Without it those fields are read-only / unavailable.
 - `POSTGRES_URL` / `DATABASE_URL` (any of the four Vercel Postgres vars) — optional. Without it `lib/db.js` falls back to in-memory storage seeded from `DEMO_USERS` and `ACTIVITY_LOG`.
 
-To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`), an admin must POST `/api/db` once after deploying with the env var set.
+To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`), an admin must POST `/api/db` once after deploying with the env var set.
+
+`lm_oauth_tokens` (added because Semrush rotates the refresh_token on use, invalidating the env-var one after the first successful refresh) is loaded lazily by [lib/semrush.js](lib/semrush.js) `ensureTokensLoaded()` on the first API call per worker, and re-written by `setTokens()` on every successful refresh. Env vars are a one-time bootstrap — once the row exists, DB wins. Admin recovery surface: `GET/POST/DELETE /api/admin/semrush-tokens` (POST accepts the same `{access_token, refresh_token, expires_in}` shape that `scripts/get-semrush-token.mjs` prints, so you can rotate without redeploying).
 
 ## Architecture
 
@@ -69,7 +71,7 @@ Because Vercel's free-tier serverless functions time out before a long bulk run 
 - The client (`app/dashboard/holiday-import/page.js`) slices into 50-location batches and calls `POST /api/holiday-push` once per batch, sleeping **15 seconds between batches** to stay under the 5/min bulk limit.
 - The Semrush bulk endpoint returns HTTP 200 even when individual locations fail — `bulkUpdateLocations()` returns `[{ locationId, state: "UPDATED" | "FAILED", error? }]`. Callers must inspect each item.
 
-The general bulk-edit modal (`components/BulkModal.js`) drives the same pattern through `PUT /api/semrush/bulk-update`. **The client must send `existingLocations`** — Semrush requires `locationName`, `city`, `address`, `phone` on every bulk item, so the route merges the change on top of these existing fields before forwarding.
+The general bulk-edit modal (`components/BulkModal.js`) drives the same pattern through `PUT /api/semrush/bulk-update`. **The client must send `existingLocations`** — Semrush validates `locationName`, `city`, `state`, `zip`, `address`, `phone` on every bulk item (the zip in particular fails with a misleading "Zip code has invalid US format" if empty, not "missing"), so the route merges the change on top of these existing fields before forwarding. `existingLocations` from the client therefore carries `{id, name, city, state, zip, address, phone, website, urlParams}` for each row.
 
 ### Data shape: app ↔ Semrush
 

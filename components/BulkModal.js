@@ -5,6 +5,22 @@ import { DEFAULT_HOURS, getBrandConfig } from "@/lib/data";
 
 const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 
+// Semrush requires E.164 format (leading "+", digits only). We accept any
+// human-typed shape — "(704) 555-1234", "13512217646", "+1-704-555-1234" —
+// and normalize to "+<digits>". Country code is the user's responsibility;
+// we don't guess it. Returns "" for empty/whitespace-only input.
+function normalizePhone(input) {
+  if (!input) return "";
+  const trimmed = String(input).trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("+")) {
+    // Already prefixed — just strip non-digits in the body so " " / "-" / "()" go away.
+    return "+" + trimmed.slice(1).replace(/\D/g, "");
+  }
+  const digits = trimmed.replace(/\D/g, "");
+  return digits ? `+${digits}` : "";
+}
+
 // `rich: true` routes the save through sequential PATCH /api/semrush/rich/[id]
 // calls (the new API has no bulk endpoint). Everything else goes through the
 // old-API bulk endpoint via the parent's onSave.
@@ -15,6 +31,7 @@ const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"
 const FIELDS = [
   { id: "hours", label: "Business Hours" },
   { id: "phone", label: "Phone" },
+  { id: "phone_per_location", label: "Phone (Per-Location)" },
   { id: "website", label: "Website" },
   { id: "url_params", label: "URL Parameters" },
   { id: "temp_closure", label: "Temp Closure" },
@@ -35,15 +52,33 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
   const brandData = (brandsList || []).find((b) => b.id === brandId) || getBrandConfig(brandId);
   const brandColor = brandData?.color || "#888";
   const allLocations = liveLocs || [];
-  const brandLocations = allLocations.filter((l) => l.brand === brandId);
+  // Sort by shop ID ascending — numeric where possible, missing IDs last.
+  const brandLocations = allLocations
+    .filter((l) => l.brand === brandId)
+    .sort((a, b) => {
+      const sa = a.shopId;
+      const sb = b.shopId;
+      if (!sa && !sb) return 0;
+      if (!sa) return 1;
+      if (!sb) return -1;
+      const na = parseInt(sa, 10);
+      const nb = parseInt(sb, 10);
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      return String(sa).localeCompare(String(sb));
+    });
 
   const [bulkField, setBulkField] = useState("hours");
   const [selected, setSelected] = useState(new Set(brandLocations.map((l) => l.id)));
+  const [shopSearch, setShopSearch] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
   // Value states for each field type
   const [phoneValue, setPhoneValue] = useState("");
+  // Per-location phone overrides: { [locationId]: "newPhone" }. When undefined,
+  // we render the location's current phone as the input value, so editing only
+  // a few rows out of many "just works" — unchanged rows are filtered at save.
+  const [perLocationPhones, setPerLocationPhones] = useState({});
   const [websiteValue, setWebsiteValue] = useState("");
   const [urlParamsValue, setUrlParamsValue] = useState("");
   const [hoursValue, setHoursValue] = useState({ ...DEFAULT_HOURS });
@@ -124,6 +159,50 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
   const fieldDef = FIELDS.find((f) => f.id === bulkField);
   const isRichField = !!fieldDef?.rich;
   const isAppendCategories = !!fieldDef?.appendCategories;
+  const isPerLocationPhone = bulkField === "phone_per_location";
+
+  // Switching INTO per-location phone clears the pre-selected "all locations"
+  // default, since the workflow is "search → check a few" rather than "edit
+  // every shop at once". Switching back to other fields keeps the empty
+  // selection — user can hit Select All if they want everything again.
+  useEffect(() => {
+    if (bulkField === "phone_per_location") {
+      setSelected(new Set());
+    }
+  }, [bulkField]);
+
+  // Filter the visible list by shop # or name substring. Selection state is
+  // untouched by search — a checked row hidden by the filter stays checked
+  // and still saves.
+  const visibleLocations = shopSearch.trim()
+    ? brandLocations.filter((l) => {
+        const q = shopSearch.trim().toLowerCase();
+        return (
+          (l.shopId && String(l.shopId).toLowerCase().includes(q)) ||
+          (l.name && l.name.toLowerCase().includes(q))
+        );
+      })
+    : brandLocations;
+
+  // Locations whose per-row phone differs from the current value AND are
+  // currently checked. Drives the Save button label/disabled state and the
+  // payload sent to the bulk-update endpoint. Uses the full list so hidden
+  // selections still count.
+  //
+  // Comparison happens on the NORMALIZED form so "13512217646" vs the
+  // stored "+13512217646" reads as no-change (otherwise the user editing
+  // away the "+" and back would falsely register as a write).
+  const phoneChanges = isPerLocationPhone
+    ? brandLocations
+        .filter((l) => selected.has(l.id))
+        .map((l) => {
+          const raw = perLocationPhones[l.id] ?? l.phone ?? "";
+          const next = normalizePhone(raw);
+          const current = normalizePhone(l.phone || "");
+          return { id: l.id, current, next, raw: String(raw).trim() };
+        })
+        .filter((c) => c.next && c.next !== c.current)
+    : [];
   // Append-categories costs 2 API calls per location (GET + PATCH) instead of 1,
   // so bump the estimate accordingly.
   const callsPerLoc = isAppendCategories ? 2 : 1;
@@ -280,6 +359,37 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
       return;
     }
 
+    // Per-location phone: build a { [id]: newPhone } map from only the rows
+    // whose value actually changed. The backend's bulk-update route reads this
+    // off body.perLocationValues instead of the shared `value`.
+    if (isPerLocationPhone) {
+      if (phoneChanges.length === 0 || phoneChanges.length > 50) return;
+      setSaving(true);
+
+      const perLocationValues = {};
+      const changedIds = phoneChanges.map((c) => c.id);
+      for (const c of phoneChanges) perLocationValues[c.id] = c.next;
+
+      const existingLocations = brandLocations
+        .filter((l) => changedIds.includes(l.id))
+        .map((l) => ({ id: l.id, name: l.name, city: l.city, state: l.state, zip: l.zip, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams }));
+
+      setTimeout(() => {
+        setSaving(false);
+        setSaved(true);
+        setTimeout(() => {
+          onSave({
+            field: "phone_per_location",
+            perLocationValues,
+            brand: brandId,
+            locationIds: changedIds,
+            existingLocations,
+          });
+        }, 600);
+      }, 1500);
+      return;
+    }
+
     setSaving(true);
 
     // Build the value payload based on field type (old-API bulk path)
@@ -313,7 +423,7 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
     // Include existing location data so required fields are available
     const existingLocations = brandLocations
       .filter((l) => selected.has(l.id))
-      .map((l) => ({ id: l.id, name: l.name, city: l.city, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams }));
+      .map((l) => ({ id: l.id, name: l.name, city: l.city, state: l.state, zip: l.zip, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams }));
 
     setTimeout(() => {
       setSaving(false);
@@ -373,6 +483,27 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
               <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>New Phone Number</label>
               <input value={phoneValue} onChange={(e) => setPhoneValue(e.target.value)} placeholder="+1 (XXX) XXX-XXXX" className="w-full px-3 py-2.5 rounded-md text-sm" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }} />
               <p className="text-[10px] mt-1" style={{ color: "#555" }}>International code required (e.g. +1 for US)</p>
+            </div>
+          )}
+
+          {isPerLocationPhone && (
+            <div className="mb-5 px-3 py-2.5 rounded-md text-[11px] flex items-start gap-2" style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", color: "#93c5fd" }}>
+              <span>ℹ</span>
+              <div className="flex-1">
+                <div className="font-semibold mb-0.5">Per-Location Phone</div>
+                <div style={{ color: "#93c5fdcc" }}>
+                  Each selected shop below shows its current phone with an editable input. Edit only the rows you want to change — unchanged rows are skipped at save.
+                </div>
+                <div className="mt-1" style={{ color: "#93c5fdcc" }}>
+                  Format: E.164 with country code, e.g. <span className="font-mono">+13125551234</span>. Plain digits like <span className="font-mono">13125551234</span> are auto-prefixed with <span className="font-mono">+</span>; spaces, dashes, and parens are stripped.
+                </div>
+                <div className="mt-1.5 flex gap-3" style={{ color: "#93c5fdcc" }}>
+                  <span>{phoneChanges.length} pending change{phoneChanges.length === 1 ? "" : "s"}</span>
+                  {phoneChanges.length > 50 && (
+                    <span style={{ color: "#fbbf24" }}>⚠ Max 50 per save — split into multiple passes</span>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -757,22 +888,77 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
           )}
 
           {/* Location selector */}
-          <span className="text-xs block mb-2" style={{ color: "#888" }}>Apply to locations</span>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <span className="text-xs" style={{ color: "#888" }}>
+              Apply to locations
+              {shopSearch.trim() && (
+                <span className="ml-1.5 text-[10px]" style={{ color: "#555" }}>
+                  ({visibleLocations.length} of {brandLocations.length})
+                </span>
+              )}
+            </span>
+            <input
+              value={shopSearch}
+              onChange={(e) => setShopSearch(e.target.value)}
+              placeholder="Search shop # or name..."
+              className="px-2.5 py-1 rounded text-[11px] w-48"
+              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+            />
+          </div>
           <div className="space-y-1">
             <label className="flex items-center gap-2 px-2.5 py-2 rounded cursor-pointer" style={{ background: "#1a1a1d" }}>
-              <input type="checkbox" checked={selected.size === brandLocations.length} onChange={toggleAll} style={{ accentColor: brandColor }} />
+              <input type="checkbox" checked={brandLocations.length > 0 && selected.size === brandLocations.length} onChange={toggleAll} style={{ accentColor: brandColor }} />
               <span className="text-xs font-semibold" style={{ color: "#aaa" }}>Select All</span>
             </label>
-            {brandLocations.map((loc) => (
-              <label key={loc.id} className="flex items-center gap-2 px-2.5 py-2 rounded cursor-pointer" style={{ background: selected.has(loc.id) ? "#1c1c1f" : "transparent", border: `1px solid ${selected.has(loc.id) ? "#2a2a2e" : "transparent"}` }}>
-                <input type="checkbox" checked={selected.has(loc.id)} onChange={() => toggleLocation(loc.id)} style={{ accentColor: brandColor }} />
-                <span className="text-[10px] font-mono font-semibold w-12 flex-shrink-0" style={{ color: loc.shopId ? "#93c5fd" : "#444" }}>
-                  {loc.shopId || "—"}
-                </span>
-                <span className="text-xs" style={{ color: selected.has(loc.id) ? "#ddd" : "#666" }}>{loc.name}</span>
-                <span className="ml-auto text-[10px]" style={{ color: "#555" }}>{loc.city}, {loc.state}</span>
-              </label>
-            ))}
+            {visibleLocations.length === 0 && (
+              <div className="py-4 text-center text-[11px]" style={{ color: "#555" }}>
+                No shops match &ldquo;{shopSearch}&rdquo;
+              </div>
+            )}
+            {visibleLocations.map((loc) => {
+              const isChecked = selected.has(loc.id);
+              const showPhoneInput = isPerLocationPhone && isChecked;
+              const rowPhone = perLocationPhones[loc.id] ?? loc.phone ?? "";
+              // Compare on the normalized form so a no-op edit (re-typing the
+              // same number without "+") doesn't read as "changed".
+              const rowNormalized = showPhoneInput ? normalizePhone(rowPhone) : "";
+              const currentNormalized = showPhoneInput ? normalizePhone(loc.phone || "") : "";
+              const isChanged = showPhoneInput && rowNormalized && rowNormalized !== currentNormalized;
+              const willTransform = showPhoneInput && rowPhone.trim() && rowPhone.trim() !== rowNormalized;
+              return (
+                <label key={loc.id} className="flex items-center gap-2 px-2.5 py-2 rounded cursor-pointer" style={{ background: isChecked ? "#1c1c1f" : "transparent", border: `1px solid ${isChanged ? brandColor + "60" : isChecked ? "#2a2a2e" : "transparent"}` }}>
+                  <input type="checkbox" checked={isChecked} onChange={() => toggleLocation(loc.id)} style={{ accentColor: brandColor }} />
+                  <span className="text-[10px] font-mono font-semibold w-12 flex-shrink-0" style={{ color: loc.shopId ? "#93c5fd" : "#444" }}>
+                    {loc.shopId || "—"}
+                  </span>
+                  <span className="text-xs flex-1 truncate" style={{ color: isChecked ? "#ddd" : "#666" }}>{loc.name}</span>
+                  {showPhoneInput ? (
+                    <div className="ml-auto flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                      <span className="text-[10px] font-mono" style={{ color: "#666" }}>{loc.phone || "—"}</span>
+                      <span style={{ color: isChanged ? brandColor : "#444" }}>→</span>
+                      <div className="flex flex-col items-end">
+                        <input
+                          type="text"
+                          value={rowPhone}
+                          onChange={(e) => setPerLocationPhones({ ...perLocationPhones, [loc.id]: e.target.value })}
+                          onClick={(e) => e.stopPropagation()}
+                          placeholder="+13125551234"
+                          className="px-2 py-1 rounded text-[11px] font-mono"
+                          style={{ background: "#151517", border: `1px solid ${isChanged ? brandColor + "60" : "#2a2a2e"}`, color: isChanged ? "#fff" : "#aaa", width: "170px", cursor: "text" }}
+                        />
+                        {willTransform && (
+                          <span className="text-[9px] font-mono mt-0.5" style={{ color: "#666" }}>
+                            sends as {rowNormalized}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="ml-auto text-[10px]" style={{ color: "#555" }}>{loc.city}, {loc.state}</span>
+                  )}
+                </label>
+              );
+            })}
           </div>
         </div>
 
@@ -796,14 +982,31 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
             {!saved && (
               <button
                 onClick={handleSave}
-                disabled={saving || selected.size === 0 || (isAppendCategories && categoriesToAppend.length === 0)}
+                disabled={
+                  saving ||
+                  selected.size === 0 ||
+                  (isAppendCategories && categoriesToAppend.length === 0) ||
+                  (isPerLocationPhone && (phoneChanges.length === 0 || phoneChanges.length > 50))
+                }
                 className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
                 style={{
                   background: brandColor,
-                  opacity: saving || selected.size === 0 || (isAppendCategories && categoriesToAppend.length === 0) ? 0.6 : 1,
+                  opacity:
+                    saving ||
+                    selected.size === 0 ||
+                    (isAppendCategories && categoriesToAppend.length === 0) ||
+                    (isPerLocationPhone && (phoneChanges.length === 0 || phoneChanges.length > 50))
+                      ? 0.6
+                      : 1,
                 }}
               >
-                {saving ? `Updating ${selected.size} locations...` : `Update ${selected.size} Locations`}
+                {isPerLocationPhone
+                  ? saving
+                    ? `Updating ${phoneChanges.length} phone${phoneChanges.length === 1 ? "" : "s"}...`
+                    : `Update ${phoneChanges.length} Phone${phoneChanges.length === 1 ? "" : "s"}`
+                  : saving
+                    ? `Updating ${selected.size} locations...`
+                    : `Update ${selected.size} Locations`}
               </button>
             )}
           </div>
