@@ -113,6 +113,15 @@ export async function PUT(request) {
       // a US location with "Zip code has invalid US format" because their
       // regex check treats empty as non-matching. Sending the existing
       // value satisfies the validator without changing anything.
+      //
+      // businessHours rides along because Semrush rejects holiday-hours
+      // updates with "You must set business hours for holiday hours setup"
+      // when the payload doesn't include them. Same defensive replay as
+      // zip — sending the location's current businessHours back unchanged
+      // is a no-op for hours but satisfies the validator for any field.
+      // If the location has no hours set, we skip the field (so a
+      // hours-less location bulk-updating holiday hours will still fail —
+      // correct behavior, the user must set business hours first).
       let updateData = {
         name: existing.name || existing.locationName || "",
         city: existing.city || "",
@@ -121,6 +130,9 @@ export async function PUT(request) {
         address: existing.address || "",
         phone: existing.phone || "",
       };
+      if (existing.businessHours) {
+        updateData.businessHours = existing.businessHours;
+      }
 
       // Apply the specific field change
       switch (field) {
