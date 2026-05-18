@@ -209,8 +209,30 @@ export default function LocationsPage() {
   //     HTTP call below.
   //   - Everything else goes through PUT /api/semrush/bulk-update as before.
   const handleBulkSave = async (data) => {
-    setBulkBrand(null);
     const brandName = brands.find((b) => b.id === data.brand)?.name || data.brand;
+
+    // Batched-bulk path (BulkModal.runBulkInBatches): modal already did the
+    // POSTs in 50-chunks with 15s sleeps. We just summarize + refresh, and
+    // intentionally leave the modal mounted so the user can inspect any
+    // per-item failures listed in its progress panel before clicking Close.
+    if (data.bulkChunked) {
+      const { totalSucceeded, totalFailed, totalSent } = data.bulkChunked;
+      const parts = [`${totalSucceeded}/${totalSent} updated`];
+      if (totalFailed > 0) parts.push(`${totalFailed} failed`);
+      showToast(`Bulk ${data.field.replace(/_/g, " ")} — ${parts.join(", ")}`);
+      logActivity(
+        "Bulk update",
+        `${brandName} — ${totalSent} locations`,
+        data.brand,
+        data.field === "phone_per_location"
+          ? `Field: per-location phone (${totalSent} numbers, batched)`
+          : `Field: ${data.field} (${totalSent} locations, batched)`
+      );
+      fetchLocations();
+      return;
+    }
+
+    setBulkBrand(null);
 
     if (data.richBulk) {
       const { succeeded, failed, skipped, total } = data.richBulk;

@@ -73,6 +73,8 @@ Because Vercel's free-tier serverless functions time out before a long bulk run 
 
 The general bulk-edit modal (`components/BulkModal.js`) drives the same pattern through `PUT /api/semrush/bulk-update`. **The client must send `existingLocations`** — Semrush validates `locationName`, `city`, `state`, `zip`, `address`, `phone` on every bulk item (the zip in particular fails with a misleading "Zip code has invalid US format" if empty, not "missing"), so the route merges the change on top of these existing fields before forwarding. `existingLocations` from the client therefore carries `{id, name, city, state, zip, address, phone, website, urlParams}` for each row.
 
+Beyond 50 locations the modal itself does the chunking via `runBulkInBatches` — it slices into 50-shop chunks and calls `PUT /api/semrush/bulk-update` once per chunk, sleeping 15s between chunks to stay under Semrush's 5-requests-per-MINUTE bulk cap. A progress panel in the modal shows current batch / total batches, succeeded / failed counts, and per-item failure messages (with `details[]` field-level info appended). The parent's `handleBulkSave` detects `data.bulkChunked` and skips the API call (the modal already did the work), then deliberately leaves the modal mounted so the user can review failures before clicking Close. Per-location phone follows the same path and is no longer hard-capped at 50.
+
 ### Data shape: app ↔ Semrush
 
 `lib/semrush.js` is the only place where these translate:

@@ -48,6 +48,12 @@ const FIELDS = [
 // Throttle between sequential rich-API PATCH requests.
 const RICH_BULK_DELAY_MS = 250;
 
+// Old-API bulk-update endpoint caps: 50 locations per request, 5 requests
+// per MINUTE. Client-side batching lets us push hundreds of locations in
+// one user action without hitting either limit.
+const BULK_CHUNK_SIZE = 50;
+const BULK_INTER_BATCH_DELAY_MS = 15000;
+
 export default function BulkModal({ brandId, brands: brandsList, locations: liveLocs, onClose, onSave }) {
   const brandData = (brandsList || []).find((b) => b.id === brandId) || getBrandConfig(brandId);
   const brandColor = brandData?.color || "#888";
@@ -156,10 +162,107 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
   const [richProgress, setRichProgress] = useState(null);
   // { current, total, succeeded, failed, skipped, errors: [{ locationName, message }] }
 
+  // Progress state for batched old-API bulk runs (any count, chunked into 50s
+  // with 15s sleeps between chunks to stay under Semrush's 5-req/min cap).
+  // { phase: 'sending'|'waiting'|'done', batch, totalBatches, totalLocations,
+  //   totalSent, totalSucceeded, totalFailed, errors: [{ batch, locationId?, message }] }
+  const [batchProgress, setBatchProgress] = useState(null);
+
   const fieldDef = FIELDS.find((f) => f.id === bulkField);
   const isRichField = !!fieldDef?.rich;
   const isAppendCategories = !!fieldDef?.appendCategories;
   const isPerLocationPhone = bulkField === "phone_per_location";
+
+  // Split `arr` into consecutive subarrays of length `size`.
+  function chunkArray(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
+
+  // Estimate wall-clock time for a batched run. Per-batch latency is mostly
+  // Semrush's response time (~1-2s typical); the 15s sleeps between batches
+  // dominate. Conservative number so the UI doesn't promise something faster
+  // than reality.
+  function estimateBatchSeconds(totalLocations) {
+    const batches = Math.ceil(totalLocations / BULK_CHUNK_SIZE);
+    const sleeps = Math.max(0, batches - 1);
+    return sleeps * (BULK_INTER_BATCH_DELAY_MS / 1000) + batches * 2;
+  }
+
+  // Sequentially POST chunks of `idList` to /api/semrush/bulk-update with
+  // 15s pauses between chunks (Semrush bulk endpoint is rate-limited at
+  // 5 req/MINUTE). `buildPayloadForChunk(chunkIds)` returns the JSON body
+  // for one chunk's request. Updates `batchProgress` throughout so the UI
+  // reflects current state. Returns the final summary.
+  async function runBulkInBatches(idList, buildPayloadForChunk) {
+    const chunks = chunkArray(idList, BULK_CHUNK_SIZE);
+    let totalSent = 0;
+    let totalSucceeded = 0;
+    let totalFailed = 0;
+    const errors = [];
+    const totalLocations = idList.length;
+    const totalBatches = chunks.length;
+
+    for (let i = 0; i < chunks.length; i++) {
+      if (i > 0) {
+        setBatchProgress({
+          phase: "waiting", batch: i + 1, totalBatches, totalLocations,
+          totalSent, totalSucceeded, totalFailed, errors,
+        });
+        await new Promise((r) => setTimeout(r, BULK_INTER_BATCH_DELAY_MS));
+      }
+
+      setBatchProgress({
+        phase: "sending", batch: i + 1, totalBatches, totalLocations,
+        totalSent, totalSucceeded, totalFailed, errors,
+      });
+
+      const chunkIds = chunks[i];
+      try {
+        const res = await fetch("/api/semrush/bulk-update", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildPayloadForChunk(chunkIds)),
+        });
+        const result = await res.json();
+        totalSent += chunkIds.length;
+
+        if (result.success) {
+          totalSucceeded += result.updated || chunkIds.length;
+        } else {
+          totalSucceeded += result.updated || 0;
+          totalFailed += result.failed || chunkIds.length;
+          if (Array.isArray(result.errors)) {
+            for (const e of result.errors) {
+              if (errors.length >= 50) break;
+              const detail = Array.isArray(e.details) && e.details.length > 0
+                ? e.details.map((d) => d.message || d.code).filter(Boolean).join("; ")
+                : null;
+              errors.push({
+                batch: i + 1,
+                locationId: e.locationId,
+                message: detail ? `${e.error} (${detail})` : e.error,
+              });
+            }
+          } else if (result.error && errors.length < 50) {
+            errors.push({ batch: i + 1, message: result.error });
+          }
+        }
+      } catch (e) {
+        totalSent += chunkIds.length;
+        totalFailed += chunkIds.length;
+        if (errors.length < 50) errors.push({ batch: i + 1, message: e.message });
+      }
+    }
+
+    const final = {
+      phase: "done", batch: totalBatches, totalBatches, totalLocations,
+      totalSent, totalSucceeded, totalFailed, errors,
+    };
+    setBatchProgress(final);
+    return final;
+  }
 
   // Switching INTO per-location phone clears the pre-selected "all locations"
   // default, since the workflow is "search → check a few" rather than "edit
@@ -353,43 +456,51 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
     });
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (isRichField) {
       handleRichBulkSave();
       return;
     }
 
     // Per-location phone: build a { [id]: newPhone } map from only the rows
-    // whose value actually changed. The backend's bulk-update route reads this
-    // off body.perLocationValues instead of the shared `value`.
+    // whose value actually changed. The backend's bulk-update route reads
+    // this off body.perLocationValues instead of the shared `value`.
+    // Sent via runBulkInBatches so counts beyond 50 are chunked into batches
+    // of 50 with 15s sleeps between them (Semrush bulk = 5 req/min limit).
     if (isPerLocationPhone) {
-      if (phoneChanges.length === 0 || phoneChanges.length > 50) return;
+      if (phoneChanges.length === 0) return;
       setSaving(true);
 
       const perLocationValues = {};
       const changedIds = phoneChanges.map((c) => c.id);
       for (const c of phoneChanges) perLocationValues[c.id] = c.next;
 
-      const existingLocations = brandLocations
+      const allExisting = brandLocations
         .filter((l) => changedIds.includes(l.id))
         .map((l) => ({ id: l.id, name: l.name, city: l.city, state: l.state, zip: l.zip, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams }));
+      const existingById = new Map(allExisting.map((l) => [l.id, l]));
 
-      setTimeout(() => {
-        setSaving(false);
-        setSaved(true);
-        setTimeout(() => {
-          onSave({
-            field: "phone_per_location",
-            perLocationValues,
-            brand: brandId,
-            locationIds: changedIds,
-            existingLocations,
-          });
-        }, 600);
-      }, 1500);
+      const summary = await runBulkInBatches(changedIds, (chunkIds) => ({
+        field: "phone_per_location",
+        // Full map is fine — backend only reads keys present in `locationIds`.
+        perLocationValues,
+        brand: brandId,
+        locationIds: chunkIds,
+        existingLocations: chunkIds.map((id) => existingById.get(id)).filter(Boolean),
+      }));
+
+      setSaving(false);
+      setSaved(true);
+      onSave({
+        field: "phone_per_location",
+        brand: brandId,
+        locationIds: changedIds,
+        bulkChunked: summary,
+      });
       return;
     }
 
+    if (selected.size === 0) return;
     setSaving(true);
 
     // Build the value payload based on field type (old-API bulk path)
@@ -421,23 +532,29 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
     }
 
     // Include existing location data so required fields are available
-    const existingLocations = brandLocations
+    const ids = Array.from(selected);
+    const allExisting = brandLocations
       .filter((l) => selected.has(l.id))
       .map((l) => ({ id: l.id, name: l.name, city: l.city, state: l.state, zip: l.zip, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams }));
+    const existingById = new Map(allExisting.map((l) => [l.id, l]));
 
-    setTimeout(() => {
-      setSaving(false);
-      setSaved(true);
-      setTimeout(() => {
-        onSave({
-          field: bulkField,
-          value,
-          brand: brandId,
-          locationIds: Array.from(selected),
-          existingLocations,
-        });
-      }, 600);
-    }, 1500);
+    const summary = await runBulkInBatches(ids, (chunkIds) => ({
+      field: bulkField,
+      value,
+      brand: brandId,
+      locationIds: chunkIds,
+      existingLocations: chunkIds.map((id) => existingById.get(id)).filter(Boolean),
+    }));
+
+    setSaving(false);
+    setSaved(true);
+    onSave({
+      field: bulkField,
+      value,
+      brand: brandId,
+      locationIds: ids,
+      bulkChunked: summary,
+    });
   };
 
   return (
@@ -497,10 +614,12 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
                 <div className="mt-1" style={{ color: "#93c5fdcc" }}>
                   Format: E.164 with country code, e.g. <span className="font-mono">+13125551234</span>. Plain digits like <span className="font-mono">13125551234</span> are auto-prefixed with <span className="font-mono">+</span>; spaces, dashes, and parens are stripped.
                 </div>
-                <div className="mt-1.5 flex gap-3" style={{ color: "#93c5fdcc" }}>
+                <div className="mt-1.5 flex gap-3 flex-wrap" style={{ color: "#93c5fdcc" }}>
                   <span>{phoneChanges.length} pending change{phoneChanges.length === 1 ? "" : "s"}</span>
-                  {phoneChanges.length > 50 && (
-                    <span style={{ color: "#fbbf24" }}>⚠ Max 50 per save — split into multiple passes</span>
+                  {phoneChanges.length > BULK_CHUNK_SIZE && (
+                    <span>
+                      Will run in {Math.ceil(phoneChanges.length / BULK_CHUNK_SIZE)} batches of {BULK_CHUNK_SIZE} with {BULK_INTER_BATCH_DELAY_MS / 1000}s pauses · ~{Math.round(estimateBatchSeconds(phoneChanges.length))}s total
+                    </span>
                   )}
                 </div>
               </div>
@@ -887,6 +1006,59 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
             </div>
           )}
 
+          {/* Batched bulk-update progress (any old-API field, any count). */}
+          {batchProgress && (
+            <div className="mb-5 px-4 py-3 rounded-lg" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e" }}>
+              <div className="flex justify-between items-baseline mb-2 gap-2">
+                <span className="text-xs font-semibold flex-1 truncate" style={{ color: "#aaa" }}>
+                  {batchProgress.phase === "done"
+                    ? "Done"
+                    : batchProgress.phase === "waiting"
+                      ? `Waiting ${BULK_INTER_BATCH_DELAY_MS / 1000}s for rate limit — next: batch ${batchProgress.batch} of ${batchProgress.totalBatches}`
+                      : `Sending batch ${batchProgress.batch} of ${batchProgress.totalBatches}…`}
+                </span>
+                <span className="text-[11px] font-mono whitespace-nowrap" style={{ color: "#888" }}>
+                  {batchProgress.totalSent} / {batchProgress.totalLocations}
+                </span>
+              </div>
+              <div className="w-full h-1.5 rounded-full overflow-hidden mb-3" style={{ background: "#111113" }}>
+                <div
+                  className="h-full transition-all"
+                  style={{
+                    width: `${batchProgress.totalLocations > 0 ? (batchProgress.totalSent / batchProgress.totalLocations) * 100 : 0}%`,
+                    background: brandColor,
+                  }}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-[11px]">
+                <div>
+                  <div style={{ color: "#888" }}>Succeeded</div>
+                  <div className="font-bold" style={{ color: "#34d399" }}>{batchProgress.totalSucceeded}</div>
+                </div>
+                <div>
+                  <div style={{ color: "#888" }}>Failed</div>
+                  <div className="font-bold" style={{ color: batchProgress.totalFailed > 0 ? "#f87171" : "#555" }}>{batchProgress.totalFailed}</div>
+                </div>
+              </div>
+              {batchProgress.errors.length > 0 && (
+                <div className="mt-3 pt-3" style={{ borderTop: "1px solid #2a2a2e" }}>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#f87171" }}>
+                    Failures (first {Math.min(batchProgress.errors.length, 20)})
+                  </div>
+                  <div className="space-y-0.5 max-h-40 overflow-auto">
+                    {batchProgress.errors.slice(0, 20).map((e, i) => (
+                      <div key={i} className="text-[10px] flex gap-2 flex-wrap">
+                        <span style={{ color: "#555" }}>b{e.batch}</span>
+                        {e.locationId && <span className="font-mono" style={{ color: "#93c5fd" }}>#{e.locationId}</span>}
+                        <span className="font-mono flex-1" style={{ color: "#f87171" }}>{e.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Location selector */}
           <div className="flex items-center justify-between gap-2 mb-2">
             <span className="text-xs" style={{ color: "#888" }}>
@@ -979,36 +1151,37 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
             >
               {saved ? "Close" : "Cancel"}
             </button>
-            {!saved && (
-              <button
-                onClick={handleSave}
-                disabled={
-                  saving ||
-                  selected.size === 0 ||
-                  (isAppendCategories && categoriesToAppend.length === 0) ||
-                  (isPerLocationPhone && (phoneChanges.length === 0 || phoneChanges.length > 50))
-                }
-                className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
-                style={{
-                  background: brandColor,
-                  opacity:
-                    saving ||
-                    selected.size === 0 ||
-                    (isAppendCategories && categoriesToAppend.length === 0) ||
-                    (isPerLocationPhone && (phoneChanges.length === 0 || phoneChanges.length > 50))
-                      ? 0.6
-                      : 1,
-                }}
-              >
-                {isPerLocationPhone
-                  ? saving
-                    ? `Updating ${phoneChanges.length} phone${phoneChanges.length === 1 ? "" : "s"}...`
-                    : `Update ${phoneChanges.length} Phone${phoneChanges.length === 1 ? "" : "s"}`
-                  : saving
-                    ? `Updating ${selected.size} locations...`
-                    : `Update ${selected.size} Locations`}
-              </button>
-            )}
+            {!saved && (() => {
+              // Effective row count differs per mode: per-location-phone counts
+              // only rows that actually changed; everything else counts checked
+              // rows. Used for both the button label and the batch ETA.
+              const effectiveCount = isPerLocationPhone ? phoneChanges.length : selected.size;
+              const batches = Math.ceil(effectiveCount / BULK_CHUNK_SIZE);
+              const batchSuffix = batches > 1
+                ? ` in ${batches} batches (~${Math.round(estimateBatchSeconds(effectiveCount))}s)`
+                : "";
+              const isDisabled =
+                saving ||
+                selected.size === 0 ||
+                (isAppendCategories && categoriesToAppend.length === 0) ||
+                (isPerLocationPhone && phoneChanges.length === 0);
+              return (
+                <button
+                  onClick={handleSave}
+                  disabled={isDisabled}
+                  className="px-5 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
+                  style={{ background: brandColor, opacity: isDisabled ? 0.6 : 1 }}
+                >
+                  {isPerLocationPhone
+                    ? saving
+                      ? `Updating ${phoneChanges.length} phone${phoneChanges.length === 1 ? "" : "s"}…`
+                      : `Update ${phoneChanges.length} Phone${phoneChanges.length === 1 ? "" : "s"}${batchSuffix}`
+                    : saving
+                      ? `Updating ${selected.size} locations…`
+                      : `Update ${selected.size} Location${selected.size === 1 ? "" : "s"}${batchSuffix}`}
+                </button>
+              );
+            })()}
           </div>
         </div>
       </div>
