@@ -18,8 +18,14 @@ import {
  * app-shaped subset (description, categories, coordinates, featured
  * message, social handles, etc.).
  *
+ * Query params:
+ *   ?raw=1  (admin only) — also includes the unfiltered upstream payload
+ *           in `raw` alongside the transformed `rich`. Diagnostic — used
+ *           when we suspect Semrush exposes fields we don't yet surface
+ *           (e.g. per-directory website URLs).
+ *
  * Response shapes:
- *   200 — { rich: { ...transformRichLocation output... } }
+ *   200 — { rich: { ...transformRichLocation output... }, raw?: {...} }
  *   200 — { rich: null, reason: "no_mapping" | "no_apikey" }
  *         (these are user-facing-warnable states, not errors)
  *   502 — { error } (upstream API error)
@@ -33,6 +39,11 @@ export async function GET(request, { params }) {
   const { id: oldId } = params;
   if (!oldId) {
     return NextResponse.json({ error: "id is required" }, { status: 400 });
+  }
+
+  const wantRaw = new URL(request.url).searchParams.get("raw") === "1";
+  if (wantRaw && user.role !== "admin") {
+    return NextResponse.json({ error: "Admin required for raw=1" }, { status: 403 });
   }
 
   const richStatus = getRichStatus();
@@ -55,7 +66,11 @@ export async function GET(request, { params }) {
 
   try {
     const raw = await getRichLocation(newId);
-    return NextResponse.json({ rich: transformRichLocation(raw) });
+    return NextResponse.json(
+      wantRaw
+        ? { rich: transformRichLocation(raw), raw }
+        : { rich: transformRichLocation(raw) }
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error.message, newId },
