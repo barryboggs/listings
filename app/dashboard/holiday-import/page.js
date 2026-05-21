@@ -4,10 +4,14 @@ import { useState, useRef } from "react";
 
 export default function HolidayImportPage() {
   const fileInputRef = useRef(null);
+  // Set true by the Stop button; the push loop checks it before each batch
+  // and during the inter-batch wait so a cancel takes effect within ~1s.
+  const cancelRef = useRef(false);
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState(null);
   const [pushing, setPushing] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [pushProgress, setPushProgress] = useState(null);
   const [pushResult, setPushResult] = useState(null);
   const [toast, setToast] = useState(null);
@@ -56,7 +60,9 @@ export default function HolidayImportPage() {
   const handlePush = async () => {
     if (!preview?.updates?.length) return;
     setPushing(true);
+    setStopping(false);
     setPushResult(null);
+    cancelRef.current = false;
 
     const updates = preview.updates;
     const batchSize = 50;
@@ -64,11 +70,15 @@ export default function HolidayImportPage() {
 
     let totalPushed = 0;
     let totalErrors = 0;
+    let batchesRun = 0;
+    let stopped = false;
     const allErrors = [];
 
     setPushProgress({ current: 0, total: totalBatches, pushed: 0, errors: 0 });
 
     for (let i = 0; i < totalBatches; i++) {
+      if (cancelRef.current) { stopped = true; break; }
+
       const batch = updates.slice(i * batchSize, (i + 1) * batchSize);
 
       setPushProgress({ current: i + 1, total: totalBatches, pushed: totalPushed, errors: totalErrors });
@@ -94,9 +104,16 @@ export default function HolidayImportPage() {
         allErrors.push({ locationId: `batch-${i + 1}`, error: error.message });
       }
 
-      // Wait 15 seconds between batches (Semrush: 5 bulk req/min)
+      batchesRun = i + 1;
+
+      // Wait 15 seconds between batches (Semrush: 5 bulk req/min). Sliced
+      // into 1s ticks so the Stop button takes effect within ~1s instead
+      // of being stuck for the full 15s.
       if (i < totalBatches - 1) {
-        await new Promise((r) => setTimeout(r, 15000));
+        for (let w = 0; w < 15; w++) {
+          if (cancelRef.current) break;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
       }
     }
 
@@ -107,9 +124,9 @@ export default function HolidayImportPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "Holiday hours import",
-          location: `${totalPushed} locations updated, ${totalErrors} errors`,
+          location: `${totalPushed} locations updated, ${totalErrors} errors${stopped ? " (stopped early)" : ""}`,
           brand: "multi-brand",
-          details: `${totalBatches} batches. ${preview.closed} closed, ${preview.specialHours} special hours.`,
+          details: `${batchesRun} of ${totalBatches} batches${stopped ? " — stopped by user" : ""}. ${preview.closed} closed, ${preview.specialHours} special hours.`,
         }),
       });
     } catch {}
@@ -118,11 +135,24 @@ export default function HolidayImportPage() {
     setPushResult({
       pushed: totalPushed,
       pushErrors: totalErrors,
-      batches: totalBatches,
+      batches: batchesRun,
+      totalBatches,
+      stopped,
       errors: allErrors.length > 0 ? allErrors.slice(0, 20) : undefined,
     });
     setPushing(false);
-    showToast(`Pushed holiday hours to ${totalPushed} locations`);
+    setStopping(false);
+    showToast(
+      stopped
+        ? `Import stopped — ${totalPushed} pushed across ${batchesRun} of ${totalBatches} batches`
+        : `Pushed holiday hours to ${totalPushed} locations`,
+      stopped && totalPushed === 0
+    );
+  };
+
+  const handleStop = () => {
+    cancelRef.current = true;
+    setStopping(true);
   };
 
   const handleDrop = (e) => {
@@ -188,10 +218,27 @@ export default function HolidayImportPage() {
       {pushProgress && (
         <div className="rounded-xl p-5 mb-5" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
           <div className="flex justify-between items-center mb-3">
-            <h4 className="text-sm font-semibold text-white">Pushing to Semrush...</h4>
-            <span className="text-xs font-mono" style={{ color: "#93c5fd" }}>
-              Batch {pushProgress.current} of {pushProgress.total}
-            </span>
+            <h4 className="text-sm font-semibold text-white">
+              {stopping ? "Stopping after this batch…" : "Pushing to Semrush..."}
+            </h4>
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-mono" style={{ color: "#93c5fd" }}>
+                Batch {pushProgress.current} of {pushProgress.total}
+              </span>
+              <button
+                onClick={handleStop}
+                disabled={stopping}
+                className="px-3 py-1 rounded-md text-[11px] font-semibold"
+                style={{
+                  background: stopping ? "#1c1c1f" : "#2d0a0a",
+                  border: `1px solid ${stopping ? "#2a2a2e" : "#5c1a1a"}`,
+                  color: stopping ? "#666" : "#f87171",
+                  cursor: stopping ? "default" : "pointer",
+                }}
+              >
+                {stopping ? "Stopping…" : "Stop"}
+              </button>
+            </div>
           </div>
           {/* Progress bar */}
           <div className="w-full h-2 rounded-full mb-3" style={{ background: "#1c1c1f" }}>
@@ -297,6 +344,16 @@ export default function HolidayImportPage() {
       {/* Push results */}
       {pushResult && (
         <div className="space-y-5">
+          {pushResult.stopped && (
+            <div className="rounded-xl p-4" style={{ background: "#2d1b0020", border: "1px solid #8b6b2040" }}>
+              <div className="text-xs font-semibold" style={{ color: "#fbbf24" }}>
+                Import stopped — ran {pushResult.batches} of {pushResult.totalBatches} batches
+              </div>
+              <p className="text-[10px] mt-1" style={{ color: "#888" }}>
+                The remaining {pushResult.totalBatches - pushResult.batches} batch(es) were not sent. Re-upload the CSV to resume; already-pushed locations will simply be re-sent (idempotent).
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[
               { label: "Pushed Successfully", value: pushResult.pushed, color: "#34d399" },
