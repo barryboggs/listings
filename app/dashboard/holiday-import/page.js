@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 
 export default function HolidayImportPage() {
   const fileInputRef = useRef(null);
@@ -16,9 +16,73 @@ export default function HolidayImportPage() {
   const [pushResult, setPushResult] = useState(null);
   const [toast, setToast] = useState(null);
 
+  // Template generator — fetched once on mount so the brand picker and
+  // shop counts work without waiting for a file upload.
+  const [allLocations, setAllLocations] = useState([]);
+  const [brandList, setBrandList] = useState([]);
+  const [tmplBrand, setTmplBrand] = useState("");
+  const [tmplDate, setTmplDate] = useState("");
+  const [tmplClosed, setTmplClosed] = useState(true);
+  const [tmplOpen, setTmplOpen] = useState("09:00");
+  const [tmplClose, setTmplClose] = useState("17:00");
+
+  useEffect(() => {
+    fetch("/api/semrush/locations")
+      .then((r) => r.json())
+      .then((d) => {
+        setAllLocations(d.locations || []);
+        setBrandList(d.brands || []);
+      })
+      .catch(() => {});
+  }, []);
+
   const showToast = (msg, isError) => {
     setToast({ msg, isError });
     setTimeout(() => setToast(null), 5000);
+  };
+
+  // Shops in the picked brand that carry a shop number (Franchise ID).
+  // Shops without one can't be imported — the holiday import matches CSV
+  // rows by Franchise ID — so they're excluded and surfaced as a count.
+  const tmplBrandShops = tmplBrand
+    ? allLocations.filter((l) => l.brand === tmplBrand && l.shopId)
+    : [];
+  const tmplBrandNoShop = tmplBrand
+    ? allLocations.filter((l) => l.brand === tmplBrand && !l.shopId).length
+    : 0;
+
+  const generateTemplate = () => {
+    if (!tmplBrand) { showToast("Pick a brand first", true); return; }
+    if (!tmplDate) { showToast("Pick a holiday date", true); return; }
+    if (!tmplClosed && (!tmplOpen || !tmplClose)) {
+      showToast("Enter open and close times, or choose Closed all day", true);
+      return;
+    }
+    if (tmplBrandShops.length === 0) {
+      showToast("No shops with a shop number for that brand", true);
+      return;
+    }
+
+    const openVal = tmplClosed ? "CLOSED" : tmplOpen;
+    const closeVal = tmplClosed ? "CLOSED" : tmplClose;
+    const sorted = [...tmplBrandShops].sort((a, b) =>
+      String(a.shopId).localeCompare(String(b.shopId), undefined, { numeric: true })
+    );
+    const rows = [
+      "Franchise ID,Holiday,Holiday Open,Holiday Close",
+      ...sorted.map((l) => `${l.shopId},${tmplDate},${openVal},${closeVal}`),
+    ];
+
+    const blob = new Blob([rows.join("\r\n")], { type: "text/csv" });
+    const brandName = (brandList.find((b) => b.id === tmplBrand)?.name || tmplBrand)
+      .replace(/\s+/g, "-")
+      .toLowerCase();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${brandName}-holiday-${tmplDate}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast(`Template generated — ${sorted.length} shops`);
   };
 
   const handleFileSelect = async (file) => {
@@ -210,6 +274,97 @@ export default function HolidayImportPage() {
               <p className="text-xs" style={{ color: "#666" }}>Drag and drop your CSV here, or click to browse</p>
               <p className="text-[10px] mt-2" style={{ color: "#555" }}>Expected columns: Franchise ID, Holiday (date), Holiday Open, Holiday Close</p>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Template generator — pre-fills a CSV with every shop of a brand for
+          a chosen date, so the user doesn't have to assemble shop IDs by hand. */}
+      {!preview && !pushResult && (
+        <div className="rounded-xl p-5 mb-5" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+          <h4 className="text-sm font-semibold text-white mb-1">Generate a template</h4>
+          <p className="text-[11px] mb-4" style={{ color: "#666" }}>
+            Build a ready-to-upload CSV with every shop in a brand for one date. Edit it after download if you need per-shop variations.
+          </p>
+
+          <div className="flex flex-wrap gap-3 items-end">
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: "#777" }}>Brand</label>
+              <select
+                value={tmplBrand}
+                onChange={(e) => setTmplBrand(e.target.value)}
+                className="px-3 py-2 rounded-md text-xs"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd", minWidth: "180px" }}
+              >
+                <option value="">Select a brand…</option>
+                {brandList.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: "#777" }}>Holiday date</label>
+              <input
+                type="date"
+                value={tmplDate}
+                onChange={(e) => setTmplDate(e.target.value)}
+                className="px-3 py-2 rounded-md text-xs"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+              />
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: "#777" }}>Hours</label>
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-1.5 text-xs cursor-pointer" style={{ color: "#ccc" }}>
+                  <input type="checkbox" checked={tmplClosed} onChange={(e) => setTmplClosed(e.target.checked)} style={{ accentColor: "#93c5fd" }} />
+                  Closed all day
+                </label>
+                {!tmplClosed && (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="time"
+                      value={tmplOpen}
+                      onChange={(e) => setTmplOpen(e.target.value)}
+                      className="px-2 py-1.5 rounded text-xs font-mono"
+                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                    />
+                    <span className="text-[11px]" style={{ color: "#555" }}>to</span>
+                    <input
+                      type="time"
+                      value={tmplClose}
+                      onChange={(e) => setTmplClose(e.target.value)}
+                      className="px-2 py-1.5 rounded text-xs font-mono"
+                      style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <button
+              onClick={generateTemplate}
+              disabled={!tmplBrand || !tmplDate || tmplBrandShops.length === 0}
+              className="px-4 py-2 rounded-md text-xs font-semibold text-white"
+              style={{
+                background: "#E31837",
+                opacity: !tmplBrand || !tmplDate || tmplBrandShops.length === 0 ? 0.5 : 1,
+              }}
+            >
+              Download CSV
+            </button>
+          </div>
+
+          {tmplBrand && (
+            <p className="text-[11px] mt-3" style={{ color: "#888" }}>
+              {tmplBrandShops.length} shop{tmplBrandShops.length === 1 ? "" : "s"} will be included.
+              {tmplBrandNoShop > 0 && (
+                <span style={{ color: "#fbbf24" }}>
+                  {" "}{tmplBrandNoShop} excluded (no shop number — can&apos;t be matched on import).
+                </span>
+              )}
+            </p>
           )}
         </div>
       )}
