@@ -21,6 +21,13 @@ export default function ShopsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
 
+  // "Locations missing a shop number" inline-assignment section.
+  const [locations, setLocations] = useState([]);
+  const [assignBrand, setAssignBrand] = useState("all");
+  const [assignInputs, setAssignInputs] = useState({}); // { [locationId]: typedShopNumber }
+  const [assignedIds, setAssignedIds] = useState(new Set()); // locations assigned this session
+  const [assignBusy, setAssignBusy] = useState(null); // location id currently saving
+
   const showToast = (msg, isError) => {
     setToast({ msg, isError });
     setTimeout(() => setToast(null), 5000);
@@ -39,7 +46,59 @@ export default function ShopsPage() {
 
   useEffect(() => {
     fetchShops();
+    fetch("/api/semrush/locations")
+      .then((r) => r.json())
+      .then((d) => setLocations(d.locations || []))
+      .catch(() => {});
   }, []);
+
+  // Semrush locations with no shop number, minus any assigned this session.
+  const missingLocations = locations.filter((l) => !l.shopId && !assignedIds.has(l.id));
+  const missingByBrand = missingLocations.reduce((acc, l) => {
+    acc[l.brand] = (acc[l.brand] || 0) + 1;
+    return acc;
+  }, {});
+  const visibleMissing =
+    assignBrand === "all"
+      ? missingLocations
+      : missingLocations.filter((l) => l.brand === assignBrand);
+
+  const handleAssign = async (loc) => {
+    const shopId = (assignInputs[loc.id] || "").trim();
+    if (!shopId) { showToast("Enter a shop number first", true); return; }
+
+    setAssignBusy(loc.id);
+    try {
+      const res = await fetch("/api/shop-numbers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "assign",
+          shopId,
+          semrushLocationId: loc.id,
+          brand: loc.brand,
+          streetAddress: loc.address,
+          city: loc.city,
+          state: loc.state,
+          zip: loc.zip,
+          phone: loc.phone,
+          website: loc.website,
+          locationName: loc.name,
+        }),
+      });
+      const result = await res.json();
+      if (res.ok && result.success) {
+        setAssignedIds((prev) => new Set(prev).add(loc.id));
+        showToast(`Shop #${shopId} assigned to ${loc.name}`);
+        fetchShops(); // refresh shop-record list + stats
+      } else {
+        showToast(result.error || "Assignment failed", true);
+      }
+    } catch (error) {
+      showToast("Assignment failed — " + error.message, true);
+    }
+    setAssignBusy(null);
+  };
 
   const handleFileSelect = async (file) => {
     if (!file) return;
@@ -330,6 +389,99 @@ export default function ShopsPage() {
                   </button>
                 );
               })}
+          </div>
+        </div>
+      )}
+
+      {/* Locations missing a shop number — inline assignment */}
+      {missingLocations.length > 0 && (
+        <div className="rounded-xl p-4 mb-5" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+          <h4 className="text-xs font-bold uppercase tracking-wider mb-1" style={{ color: "#fbbf24" }}>
+            Locations Missing a Shop Number ({missingLocations.length})
+          </h4>
+          <p className="text-[11px] mb-3" style={{ color: "#666" }}>
+            These Semrush locations have no shop number. Type the Driven Brands shop number and Save to link it — this creates the record and matches it in one step.
+          </p>
+
+          {/* Brand filter */}
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            <button
+              onClick={() => setAssignBrand("all")}
+              className="px-2.5 py-1 rounded text-[11px] font-semibold"
+              style={{
+                background: assignBrand === "all" ? "#1c1c1f" : "transparent",
+                border: `1px solid ${assignBrand === "all" ? "#2a2a2e" : "transparent"}`,
+                color: assignBrand === "all" ? "#ddd" : "#666",
+              }}
+            >
+              All ({missingLocations.length})
+            </button>
+            {Object.entries(missingByBrand)
+              .sort((a, b) => b[1] - a[1])
+              .map(([bid, count]) => {
+                const cfg = getBrandConfig(bid);
+                const active = assignBrand === bid;
+                return (
+                  <button
+                    key={bid}
+                    onClick={() => setAssignBrand(active ? "all" : bid)}
+                    className="px-2.5 py-1 rounded text-[11px] font-semibold"
+                    style={{
+                      background: active ? cfg.color + "25" : cfg.color + "10",
+                      border: `1px solid ${active ? cfg.color : cfg.color + "30"}`,
+                      color: cfg.color,
+                    }}
+                  >
+                    {cfg.name} ({count})
+                  </button>
+                );
+              })}
+          </div>
+
+          {/* Rows */}
+          <div className="space-y-1 max-h-96 overflow-auto">
+            {visibleMissing.map((loc) => {
+              const cfg = getBrandConfig(loc.brand);
+              const busy = assignBusy === loc.id;
+              const typed = (assignInputs[loc.id] || "").trim();
+              return (
+                <div key={loc.id} className="flex items-center gap-3 px-3 py-2 rounded" style={{ background: "#1a1a1d" }}>
+                  <span className="w-1.5 h-5 rounded-sm flex-shrink-0" style={{ background: cfg.color }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-white truncate">{loc.name}</div>
+                    <div className="text-[10px] truncate" style={{ color: "#666" }}>
+                      {loc.address}, {loc.city}, {loc.state} {loc.zip} · {loc.phone || "no phone"}
+                    </div>
+                  </div>
+                  <input
+                    value={assignInputs[loc.id] || ""}
+                    onChange={(e) => setAssignInputs((p) => ({ ...p, [loc.id]: e.target.value }))}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !busy && typed) handleAssign(loc); }}
+                    placeholder="Shop #"
+                    className="px-2 py-1 rounded text-xs font-mono w-24 flex-shrink-0"
+                    style={{ background: "#151517", border: "1px solid #2a2a2e", color: "#ddd" }}
+                  />
+                  <button
+                    onClick={() => handleAssign(loc)}
+                    disabled={busy || !typed}
+                    className="px-3 py-1 rounded text-[11px] font-semibold flex-shrink-0"
+                    style={{
+                      background: "#1c1c1f",
+                      border: "1px solid #2a2a2e",
+                      color: "#93c5fd",
+                      opacity: busy || !typed ? 0.5 : 1,
+                    }}
+                  >
+                    {busy ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              );
+            })}
+            {visibleMissing.length === 0 && (
+              <div className="py-4 text-center text-[11px]" style={{ color: "#555" }}>
+                No missing-number locations for this brand.
+              </div>
+            )}
           </div>
         </div>
       )}

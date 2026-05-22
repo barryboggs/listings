@@ -6,6 +6,7 @@ import {
   importShopNumbers,
   bulkMatchShops,
   matchShopToLocation,
+  assignShopNumber,
   clearShopNumbers,
 } from "@/lib/db";
 import { logActivity } from "@/lib/db";
@@ -142,10 +143,44 @@ export async function POST(request) {
     });
   }
 
-  // Handle manual match
+  // Handle manual match — link an existing shop-number record to a location
   if (body.action === "manual-match") {
     await matchShopToLocation(body.shopId, body.semrushLocationId);
     return NextResponse.json({ success: true });
+  }
+
+  // Handle direct assignment — create-or-link a shop number to a location.
+  // Backs the "locations missing a shop number" inline assignment view:
+  // unlike manual-match, this also creates the lm_shop_numbers row if it
+  // doesn't exist yet, seeded from the Semrush location's fields.
+  if (body.action === "assign") {
+    const shopId = String(body.shopId || "").trim();
+    const { semrushLocationId } = body;
+    if (!shopId || !semrushLocationId) {
+      return NextResponse.json(
+        { error: "shopId and semrushLocationId are required" },
+        { status: 400 }
+      );
+    }
+    await assignShopNumber({
+      shopId,
+      semrushLocationId,
+      brand: body.brand,
+      streetAddress: body.streetAddress,
+      city: body.city,
+      state: body.state,
+      zip: body.zip,
+      phone: body.phone,
+      website: body.website,
+    });
+    await logActivity({
+      user: user.name,
+      action: "Assigned shop number",
+      location: body.locationName || semrushLocationId,
+      brand: body.brand || "system",
+      details: `Shop #${shopId} linked to location ${semrushLocationId}`,
+    });
+    return NextResponse.json({ success: true, shopId });
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
