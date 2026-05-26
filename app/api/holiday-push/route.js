@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
 import { bulkUpdateLocations, toSemrushFormat } from "@/lib/semrush";
+import { recordPendingPushes } from "@/lib/db";
 
 /**
  * POST - Push a single batch of holiday hour updates to Semrush.
@@ -56,10 +57,22 @@ export async function POST(request) {
   try {
     const batchResults = await bulkUpdateLocations(semrushPayloads);
 
+    const successPending = [];
     if (Array.isArray(batchResults)) {
       for (const r of batchResults) {
         if (r.state === "UPDATED") {
           pushed++;
+          const update = updates.find((u) => u.loc.id === r.locationId);
+          if (update) {
+            successPending.push({
+              semrushLocationId: r.locationId,
+              locationName: update.loc?.name || "",
+              shopId: update.shopId || update.loc?.shopId || "",
+              brand: update.loc?.brand || "",
+              fields: "holiday_hours (CSV import)",
+              pushedBy: user.name,
+            });
+          }
         } else {
           pushErrors++;
           // Find the shop ID for this location
@@ -74,6 +87,25 @@ export async function POST(request) {
       }
     } else {
       pushed = semrushPayloads.length;
+      // Old API shape without per-item results — record all as pending.
+      for (const update of updates) {
+        successPending.push({
+          semrushLocationId: update.loc.id,
+          locationName: update.loc?.name || "",
+          shopId: update.shopId || update.loc?.shopId || "",
+          brand: update.loc?.brand || "",
+          fields: "holiday_hours (CSV import)",
+          pushedBy: user.name,
+        });
+      }
+    }
+
+    // Record successful pushes in the pending-approval queue. Fire-and-forget
+    // so a DB hiccup doesn't fail the batch response.
+    if (successPending.length > 0) {
+      recordPendingPushes(successPending).catch((e) =>
+        console.error("recordPendingPushes (holiday-push):", e.message)
+      );
     }
   } catch (error) {
     // Entire batch failed — report all locations in this batch

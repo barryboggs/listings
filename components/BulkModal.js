@@ -477,7 +477,7 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
 
       const allExisting = brandLocations
         .filter((l) => changedIds.includes(l.id))
-        .map((l) => ({ id: l.id, name: l.name, city: l.city, state: l.state, zip: l.zip, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams, businessHours: l.businessHours }));
+        .map((l) => ({ id: l.id, name: l.name, shopId: l.shopId, city: l.city, state: l.state, zip: l.zip, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams, businessHours: l.businessHours }));
       const existingById = new Map(allExisting.map((l) => [l.id, l]));
 
       const summary = await runBulkInBatches(changedIds, (chunkIds) => ({
@@ -535,7 +535,7 @@ export default function BulkModal({ brandId, brands: brandsList, locations: live
     const ids = Array.from(selected);
     const allExisting = brandLocations
       .filter((l) => selected.has(l.id))
-      .map((l) => ({ id: l.id, name: l.name, city: l.city, state: l.state, zip: l.zip, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams, businessHours: l.businessHours }));
+      .map((l) => ({ id: l.id, name: l.name, shopId: l.shopId, city: l.city, state: l.state, zip: l.zip, address: l.address, phone: l.phone, website: l.website, urlParams: l.urlParams, businessHours: l.businessHours }));
     const existingById = new Map(allExisting.map((l) => [l.id, l]));
 
     const summary = await runBulkInBatches(ids, (chunkIds) => ({

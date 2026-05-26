@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
 import { getLocation, updateLocation, getTokenStatus, toSemrushFormat } from "@/lib/semrush";
+import { recordPendingPushes } from "@/lib/db";
 
 /**
  * GET /api/semrush/locations/[id]?raw=1  (admin-only diagnostic)
@@ -80,6 +81,18 @@ export async function PUT(request, { params }) {
 
   try {
     const result = await updateLocation(locationId, semrushPayload);
+
+    // Record in the pending-approval queue so the user can find this shop
+    // later in /dashboard/pending-approval without hunting in Semrush.
+    // Fire-and-forget: don't let DB hiccups fail the API response.
+    recordPendingPushes([{
+      semrushLocationId: locationId,
+      locationName: body.name || "",
+      shopId: body.shopId || "",
+      brand: body.brand || "",
+      fields: "single edit",
+      pushedBy: user.name,
+    }]).catch((e) => console.error("recordPendingPushes (single):", e.message));
 
     return NextResponse.json({
       success: true,

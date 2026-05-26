@@ -5,6 +5,7 @@ import {
   getTokenStatus,
   toSemrushFormat,
 } from "@/lib/semrush";
+import { recordPendingPushes } from "@/lib/db";
 
 // Semrush requires E.164 ("+<digits>"). Mirrors the client-side normalizer
 // in components/BulkModal.js — kept here too so any caller (CSV import,
@@ -178,6 +179,29 @@ export async function PUT(request) {
     // results = [{ locationId, state: "UPDATED"|"FAILED", error? }]
     const updated = results.filter((r) => r.state === "UPDATED").length;
     const failed = results.filter((r) => r.state === "FAILED").length;
+
+    // Record the successful shops in the pending-approval queue. existingMap
+    // gives us each shop's name/brand for the listing. We skip the FAILED
+    // shops — Semrush didn't accept them, so there's nothing for the user to
+    // approve in their UI. Fire-and-forget.
+    const pendingRows = results
+      .filter((r) => r.state === "UPDATED")
+      .map((r) => {
+        const existing = existingMap.get(r.locationId) || {};
+        return {
+          semrushLocationId: r.locationId,
+          locationName: existing.name || "",
+          shopId: existing.shopId || "",
+          brand: body.brand || "",
+          fields: field,
+          pushedBy: user.name,
+        };
+      });
+    if (pendingRows.length > 0) {
+      recordPendingPushes(pendingRows).catch((e) =>
+        console.error("recordPendingPushes (bulk):", e.message)
+      );
+    }
     const errors = results
       .filter((r) => r.state === "FAILED")
       .map((r) => ({
