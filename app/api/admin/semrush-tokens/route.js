@@ -60,8 +60,11 @@ export async function POST(request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const accessToken = body.accessToken || body.access_token;
-  const refreshToken = body.refreshToken || body.refresh_token || null;
+  // Defensive trim — accidental whitespace from copy-paste of OAuth-
+  // script output has historically silently broken stored credentials.
+  const accessToken = (body.accessToken || body.access_token || "").trim();
+  const rawRefresh = body.refreshToken || body.refresh_token;
+  const refreshToken = rawRefresh ? String(rawRefresh).trim() : null;
   const expiresIn = body.expiresIn || body.expires_in || null;
 
   if (!accessToken) {
