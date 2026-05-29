@@ -19,9 +19,15 @@ Required env vars (see `.env.example`):
 - `SEMRUSH_API_KEY` — optional. Enables the "rich" fields (description, categories, coordinates, social) via the newer local API. This is a **different credential type** from the Bearer token above — pulled from the Semrush Subscription Info page, not OAuth. Without it those fields are read-only / unavailable.
 - `POSTGRES_URL` / `DATABASE_URL` (any of the four Vercel Postgres vars) — optional. Without it `lib/db.js` falls back to in-memory storage seeded from `DEMO_USERS` and `ACTIVITY_LOG`.
 
-To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`), an admin must POST `/api/db` once after deploying with the env var set.
+To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`, `lm_pending_pushes`, `lm_gbp_photo_pushes`), an admin must POST `/api/db` once after deploying with the env var set. `CREATE TABLE IF NOT EXISTS` everywhere, so re-running is always safe.
 
 `lm_oauth_tokens` (added because Semrush rotates the refresh_token on use, invalidating the env-var one after the first successful refresh) is loaded lazily by [lib/semrush.js](lib/semrush.js) `ensureTokensLoaded()` on the first API call per worker, and re-written by `setTokens()` on every successful refresh. Env vars are a one-time bootstrap — once the row exists, DB wins. Admin recovery surface: `GET/POST/DELETE /api/admin/semrush-tokens` (POST accepts the same `{access_token, refresh_token, expires_in}` shape that `scripts/get-semrush-token.mjs` prints, so you can rotate without redeploying).
+
+### GBP integration (Phase 0 scaffolding present, deeper phases pending)
+
+A scaffold for direct Google Business Profile photo pushes lives in [lib/google-bp.js](lib/google-bp.js) — OAuth 2.0 authorization-code flow against the GBP API, token persistence via `lm_oauth_tokens` (provider `google_bp`), and stub helpers for listing accounts/locations (`listAccounts`, `listLocations`) and creating media (`createLocationMedia`). The `business.manage` scope is requested with `access_type=offline` and `prompt=consent` so we reliably get a refresh token. Activates only when `GOOGLE_BP_CLIENT_ID`/`SECRET` are set in env — without them, `isGoogleBpConfigured()` is false and the OAuth routes return 503.
+
+OAuth flow lives at `/api/auth/google-bp/start` (admin-only, redirects to Google) and `/api/auth/google-bp/callback` (verifies CSRF state cookie, exchanges code for tokens). `lm_shop_numbers` carries `gbp_account_id` + `gbp_location_id` for the Phase 2 shop↔GBP mapping (populated by a future sync job mirroring `bulkSetNewIds`). `lm_gbp_photo_pushes` audits Phase 3 bulk pushes — `recordGbpPhotoPush()` inserts as PENDING, `resolveGbpPhotoPush()` flips to SUCCESS|FAILED. None of these are wired to a UI yet — Phase 1 builds the connection flow and account listing, Phase 2 the mapping sync, Phase 3 the bulk-push page.
 
 ## Architecture
 
