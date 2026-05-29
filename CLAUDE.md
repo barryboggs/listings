@@ -145,7 +145,7 @@ Both API client modules track `lastSuccessAt` / `lastErrorAt` / `lastErrorMessag
 | `no_token` | any | "Demo Mode" (yellow) |
 | `untested` | any | "API ready" (blue) — cold worker, no calls flowed yet |
 
-Telemetry is per-serverless-instance, so a cold start resets to `untested`. That's acceptable: the first real API call updates it within milliseconds.
+Telemetry is per-serverless-instance, so without intervention a cold worker would stay at `untested` until it served a Semrush-touching route, and a worker that hit an old error would keep reporting `failing` long after the underlying issue was fixed. To prevent that drift, `GET /api/semrush/token` now actively pings both APIs (`GET /external/locations?size=1` and `GET /locations?limit=1`, in parallel) before returning telemetry. Adds ~150ms to badge polls but guarantees the badge reflects current truth instead of stale per-worker cache. Pass `?skipPing=1` to short-circuit when you want to see what telemetry looks like *without* triggering a refresh attempt (diagnostic use).
 
 ### Bulk rich-field updates (Phase 4)
 
