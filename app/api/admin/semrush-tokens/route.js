@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
-import { setTokens, getTokenStatus } from "@/lib/semrush";
+import { setTokensAndPersist, getTokenStatus } from "@/lib/semrush";
 import { getOauthTokenMeta, clearOauthTokens } from "@/lib/db";
 
 /**
@@ -71,8 +71,23 @@ export async function POST(request) {
     );
   }
 
-  // setTokens writes both the in-memory cache AND fires a DB persist.
-  setTokens({ accessToken, refreshToken, expiresIn });
+  // AWAIT the DB write so a silent failure surfaces here instead of
+  // leaving the admin with a misleading 200 OK while DB still holds the
+  // previous (broken) tokens. This was the root cause of the recurring
+  // "tokens recovered, then broke again two days later" pattern — the
+  // worker that handled the POST cached the new tokens fine, but the DB
+  // persist failed silently and every cold start after that read the
+  // old tokens from DB.
+  const persisted = await setTokensAndPersist({ accessToken, refreshToken, expiresIn });
+  if (!persisted) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Tokens accepted in memory but DB write failed. They will be lost on the next cold start. Check Postgres connectivity and that lm_oauth_tokens exists (run POST /api/db once if not).",
+      },
+      { status: 502 }
+    );
+  }
 
   return NextResponse.json({
     success: true,
