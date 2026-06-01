@@ -96,7 +96,15 @@ export async function POST(request) {
     updates: [],
   };
 
-  const seenLocationIds = new Set();
+  // Aggregate by location: each row contributes its Holiday 1 + Holiday 2
+  // entries to the shop's running list. A CSV with N rows for the same
+  // shop now produces one update with all of that shop's holidays merged.
+  // Previously a hard "skip if seen" dropped all rows after the first,
+  // so multi-row holiday CSVs silently lost data after row 1.
+  //
+  // Within a shop, dedupe by date — first-write-wins for predictability
+  // (same shop + same date appearing twice keeps the first row's hours).
+  const byLocation = new Map(); // locationId → { loc, shopId, holidayHours, seenDates }
 
   for (let i = 1; i < lines.length; i++) {
     const cols = parseCSVLine(lines[i]);
@@ -112,56 +120,55 @@ export async function POST(request) {
       continue;
     }
 
-    // Deduplicate by location ID
-    if (seenLocationIds.has(loc.id)) continue;
-    seenLocationIds.add(loc.id);
+    // First time we see this shop, register it and count it as matched.
+    let acc = byLocation.get(loc.id);
+    if (!acc) {
+      acc = { loc, shopId, holidayHours: [], seenDates: new Set() };
+      byLocation.set(loc.id, acc);
+      results.matched++;
+    }
 
-    results.matched++;
-
-    const holidayHours = [];
-
-    // Holiday 1
-    const date1 = parseDate(cols[holiday1Idx]);
-    if (date1) {
-      const open1 = cols[holiday1OpenIdx] || "";
-      const close1 = cols[holiday1CloseIdx] || "";
-      if (isClosed(open1, close1)) {
-        holidayHours.push({ type: "CLOSED", day: date1 });
+    // Parse one (date, open, close) tuple from the row and append to the
+    // shop's accumulator if it's a new date and the hours parse cleanly.
+    // `isSecond` flips the counter that drives the "Second Holiday" stat
+    // card in the UI; otherwise it shows the Holiday 1 counts.
+    const addEntry = (dateIdx, openIdx, closeIdx, isSecond) => {
+      if (dateIdx < 0) return;
+      const date = parseDate(cols[dateIdx]);
+      if (!date) return;
+      if (acc.seenDates.has(date)) return;
+      const openVal = cols[openIdx] || "";
+      const closeVal = cols[closeIdx] || "";
+      let entry = null;
+      if (isClosed(openVal, closeVal)) {
+        entry = { type: "CLOSED", day: date };
         results.closed++;
       } else {
-        const from = parseTime(open1);
-        const to = parseTime(close1);
+        const from = parseTime(openVal);
+        const to = parseTime(closeVal);
         if (from && to) {
-          holidayHours.push({ type: "RANGE", day: date1, times: [{ from, to }] });
+          entry = { type: "RANGE", day: date, times: [{ from, to }] };
           results.specialHours++;
         }
       }
-    }
-
-    // Holiday 2
-    if (holiday2Idx >= 0) {
-      const date2 = parseDate(cols[holiday2Idx] || "");
-      if (date2) {
-        const open2 = cols[holiday2OpenIdx] || "";
-        const close2 = cols[holiday2CloseIdx] || "";
-        results.holiday2Count++;
-        if (isClosed(open2, close2)) {
-          holidayHours.push({ type: "CLOSED", day: date2 });
-        } else {
-          const from = parseTime(open2);
-          const to = parseTime(close2);
-          if (from && to) {
-            holidayHours.push({ type: "RANGE", day: date2, times: [{ from, to }] });
-          }
-        }
+      if (entry) {
+        acc.holidayHours.push(entry);
+        acc.seenDates.add(date);
+        if (isSecond) results.holiday2Count++;
       }
-    }
+    };
 
-    if (holidayHours.length > 0) {
+    addEntry(holiday1Idx, holiday1OpenIdx, holiday1CloseIdx, false);
+    addEntry(holiday2Idx, holiday2OpenIdx, holiday2CloseIdx, true);
+  }
+
+  // Flatten the per-location map into the updates[] the client iterates.
+  for (const acc of byLocation.values()) {
+    if (acc.holidayHours.length > 0) {
       results.updates.push({
-        loc,
-        shopId,
-        holidayHours,
+        loc: acc.loc,
+        shopId: acc.shopId,
+        holidayHours: acc.holidayHours,
       });
     }
   }

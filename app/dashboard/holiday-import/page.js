@@ -580,9 +580,10 @@ export default function HolidayImportPage() {
         <h4 className="text-xs font-bold mb-2" style={{ color: "#aaa" }}>CSV Format</h4>
         <div className="text-xs leading-relaxed space-y-1" style={{ color: "#777" }}>
           <p><strong style={{ color: "#aaa" }}>Required:</strong> Franchise ID (shop number), Holiday (date like 4/5/2026), Holiday Open, Holiday Close</p>
-          <p><strong style={{ color: "#aaa" }}>Optional:</strong> Holiday 2, Holiday Open 2, Holiday Close 2 (for a second holiday date)</p>
-          <p><strong style={{ color: "#aaa" }}>Closed:</strong> Set Holiday Open and Holiday Close to "Close" or "CLOSED"</p>
-          <p><strong style={{ color: "#aaa" }}>Special hours:</strong> Use time format like "9:00:00 AM" or "5:00:00 PM"</p>
+          <p><strong style={{ color: "#aaa" }}>Optional:</strong> Holiday 2, Holiday Open 2, Holiday Close 2 (for a second holiday date in the same row)</p>
+          <p><strong style={{ color: "#aaa" }}>Multiple holidays per shop:</strong> repeat the Franchise ID across as many rows as you need. All a shop&apos;s holidays across rows are merged into a single push.</p>
+          <p><strong style={{ color: "#aaa" }}>Closed:</strong> Set Holiday Open and Holiday Close to &ldquo;Close&rdquo; or &ldquo;CLOSED&rdquo;</p>
+          <p><strong style={{ color: "#aaa" }}>Special hours:</strong> Use time format like &ldquo;9:00:00 AM&rdquo; or &ldquo;5:00:00 PM&rdquo;</p>
         </div>
       </div>
     </>
