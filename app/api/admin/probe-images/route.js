@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
 import { getNewIdForOldId } from "@/lib/db";
-import { listLocationImages, createLocationImage } from "@/lib/semrush-rich";
+import { listLocationImages, createLocationImage, createLocationImageRaw } from "@/lib/semrush-rich";
 
 /**
  * Admin-only diagnostic for the (newly-discovered) image endpoints on
@@ -97,10 +97,14 @@ export async function POST(request) {
   if (error) return error;
 
   const body = await request.json().catch(() => ({}));
-  const { shopId, oldLocationId, sourceUrl, category = "ADDITIONAL", validateOnly = false } = body;
+  const { shopId, oldLocationId, sourceUrl, category = "ADDITIONAL", validateOnly = false, body: rawBody } = body;
 
-  if (!sourceUrl) {
-    return NextResponse.json({ error: "sourceUrl is required" }, { status: 400 });
+  // Either send our typed body via createLocationImage, OR send an
+  // arbitrary literal `body` object via createLocationImageRaw — used to
+  // iterate on field names without redeploying. If both are provided,
+  // rawBody wins.
+  if (!rawBody && !sourceUrl) {
+    return NextResponse.json({ error: "Provide `sourceUrl` (typed mode) or `body` (raw mode)" }, { status: 400 });
   }
 
   let newId = null;
@@ -124,15 +128,18 @@ export async function POST(request) {
     return NextResponse.json({ error: "Provide shopId or oldLocationId in body" }, { status: 400 });
   }
 
+  const requestPath = `/locations/${newId}/images${validateOnly ? "?validate_only=true" : ""}`;
+  const sentBody = rawBody ? rawBody : { sourceUrl, category };
+
   try {
-    const raw = await createLocationImage(newId, { sourceUrl, category, validateOnly });
+    const raw = rawBody
+      ? await createLocationImageRaw(newId, rawBody, { validateOnly })
+      : await createLocationImage(newId, { sourceUrl, category, validateOnly });
+
     return NextResponse.json({
       newId,
       foundLocation,
-      requestSent: {
-        path: `/locations/${newId}/images${validateOnly ? "?validate_only=true" : ""}`,
-        body: { sourceUrl, category },
-      },
+      requestSent: { path: requestPath, body: sentBody },
       raw,
     });
   } catch (e) {
@@ -140,7 +147,7 @@ export async function POST(request) {
       error: e.message,
       newId,
       foundLocation,
-      requestAttempted: { sourceUrl, category, validateOnly },
+      requestAttempted: { path: requestPath, body: sentBody, validateOnly },
     }, { status: 502 });
   }
 }
