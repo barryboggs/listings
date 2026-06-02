@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
 import { getNewIdForOldId } from "@/lib/db";
-import { listLocationImages, createLocationImage, createLocationImageRaw } from "@/lib/semrush-rich";
+import { listLocationImages, createLocationImage, createLocationImageRaw, uploadLocationImage } from "@/lib/semrush-rich";
 
 /**
  * Admin-only diagnostic for the (newly-discovered) image endpoints on
@@ -97,14 +97,22 @@ export async function POST(request) {
   if (error) return error;
 
   const body = await request.json().catch(() => ({}));
-  const { shopId, oldLocationId, sourceUrl, category = "ADDITIONAL", validateOnly = false, body: rawBody } = body;
+  const {
+    shopId, oldLocationId,
+    sourceUrl, category = "ADDITIONAL", validateOnly = false,
+    body: rawBody,
+    multipartUrl, // NEW: if provided, fetch this URL server-side and upload as multipart
+  } = body;
 
-  // Either send our typed body via createLocationImage, OR send an
-  // arbitrary literal `body` object via createLocationImageRaw — used to
-  // iterate on field names without redeploying. If both are provided,
-  // rawBody wins.
-  if (!rawBody && !sourceUrl) {
-    return NextResponse.json({ error: "Provide `sourceUrl` (typed mode) or `body` (raw mode)" }, { status: 400 });
+  // Three modes:
+  //   1. JSON typed: createLocationImage(newId, { sourceUrl, category, validateOnly })
+  //   2. JSON raw: createLocationImageRaw(newId, body, { validateOnly })
+  //   3. Multipart (matches what Semrush's own UI does): server fetches
+  //      `multipartUrl`, wraps as multipart/form-data with a `file` part,
+  //      POSTs to /images. Confirmed working in their UI; this tests
+  //      whether it works on the public API too.
+  if (!rawBody && !sourceUrl && !multipartUrl) {
+    return NextResponse.json({ error: "Provide `multipartUrl` (multipart mode), `sourceUrl` (typed JSON), or `body` (raw JSON)" }, { status: 400 });
   }
 
   let newId = null;
@@ -128,6 +136,56 @@ export async function POST(request) {
     return NextResponse.json({ error: "Provide shopId or oldLocationId in body" }, { status: 400 });
   }
 
+  // Multipart mode — server fetches the image, wraps as multipart/form-data
+  if (multipartUrl) {
+    let fileBytes, contentType, filename;
+    try {
+      const imgRes = await fetch(multipartUrl);
+      if (!imgRes.ok) {
+        return NextResponse.json({
+          error: `Failed to fetch multipartUrl: HTTP ${imgRes.status}`,
+          multipartUrl,
+        }, { status: 400 });
+      }
+      const arrayBuffer = await imgRes.arrayBuffer();
+      fileBytes = arrayBuffer;
+      contentType = imgRes.headers.get("content-type") || "application/octet-stream";
+      const urlPath = new URL(multipartUrl).pathname;
+      filename = urlPath.substring(urlPath.lastIndexOf("/") + 1) || "image";
+    } catch (e) {
+      return NextResponse.json({ error: `Fetching multipartUrl failed: ${e.message}` }, { status: 400 });
+    }
+
+    try {
+      const raw = await uploadLocationImage(newId, { fileBytes, filename, contentType });
+      return NextResponse.json({
+        newId,
+        foundLocation,
+        requestSent: {
+          path: `/locations/${newId}/images`,
+          contentType,
+          filename,
+          sizeBytes: fileBytes.byteLength || fileBytes.size,
+        },
+        raw,
+      });
+    } catch (e) {
+      return NextResponse.json({
+        error: e.message,
+        newId,
+        foundLocation,
+        requestAttempted: {
+          path: `/locations/${newId}/images`,
+          mode: "multipart",
+          contentType,
+          filename,
+          sizeBytes: fileBytes.byteLength || fileBytes.size,
+        },
+      }, { status: 502 });
+    }
+  }
+
+  // JSON mode (existing typed + raw paths)
   const requestPath = `/locations/${newId}/images${validateOnly ? "?validate_only=true" : ""}`;
   const sentBody = rawBody ? rawBody : { sourceUrl, category };
 
