@@ -175,6 +175,77 @@ export default function ShopsPage() {
     setMatching(false);
   };
 
+  // Export currently-filtered shops to a CSV the admin can open in Excel /
+  // diff against their master Driven Brands shop list to find shops that
+  // aren't in Semrush yet. Respects the active brand/matched/search filters
+  // so the export targets whatever the user is currently looking at.
+  const handleExport = () => {
+    if (filteredShops.length === 0) {
+      showToast("No shops to export with the current filters", true);
+      return;
+    }
+
+    const csvEscape = (val) => {
+      const s = String(val ?? "");
+      if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    };
+
+    const headers = [
+      "Shop ID",
+      "Brand",
+      "Street Address",
+      "Address 2",
+      "City",
+      "State",
+      "Zip",
+      "Country",
+      "Phone",
+      "Website",
+      "Status",
+      "Semrush Location ID",
+      "Semrush New ID",
+      "Matched At",
+    ];
+
+    const rows = filteredShops.map((s) => [
+      s.shop_id || "",
+      s.brand || "",
+      s.street_address || "",
+      s.address2 || "",
+      s.city || "",
+      s.state || "",
+      s.zip || "",
+      s.country || "",
+      s.phone || "",
+      s.website || "",
+      s.semrush_location_id ? "Linked" : "Unmatched",
+      s.semrush_location_id || "",
+      s.semrush_new_id || "",
+      s.matched_at || "",
+    ]);
+
+    const csv = [
+      headers.map(csvEscape).join(","),
+      ...rows.map((row) => row.map(csvEscape).join(",")),
+    ].join("\r\n");
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const today = new Date().toISOString().split("T")[0];
+    const brandPart = brandFilter === "all" ? "all-brands" : brandFilter;
+    const filterPart = filter === "all" ? "" : `-${filter}`;
+    const filename = `shop-numbers-${brandPart}${filterPart}-${today}.csv`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+
+    showToast(`Exported ${filteredShops.length} shops to ${filename}`);
+  };
+
   const handleClear = async () => {
     if (!confirm("Delete all shop number data? This cannot be undone.")) return;
     try {
@@ -242,6 +313,15 @@ export default function ShopsPage() {
         <div className="flex gap-2">
           {stats.total > 0 && (
             <>
+              <button
+                onClick={handleExport}
+                disabled={filteredShops.length === 0}
+                title={filteredShops.length === 0 ? "No shops match the current filters" : `Export ${filteredShops.length} filtered shops to CSV`}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold"
+                style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", color: "#93c5fd", opacity: filteredShops.length === 0 ? 0.5 : 1 }}
+              >
+                Export CSV ({filteredShops.length})
+              </button>
               <button onClick={handleReMatch} disabled={matching} className="px-3 py-1.5 rounded-md text-xs font-semibold" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa", opacity: matching ? 0.6 : 1 }}>
                 {matching ? "Matching..." : "Re-Match All"}
               </button>
