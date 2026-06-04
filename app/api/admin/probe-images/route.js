@@ -101,18 +101,24 @@ export async function POST(request) {
     shopId, oldLocationId,
     sourceUrl, category = "ADDITIONAL", validateOnly = false,
     body: rawBody,
-    multipartUrl, // NEW: if provided, fetch this URL server-side and upload as multipart
+    multipartUrl,
+    base64Url,       // NEW: confirmed-correct mode — server fetches URL, base64-encodes, POSTs as JSON { content, type }
+    type = "PHOTO",
+    description,
   } = body;
 
-  // Three modes:
-  //   1. JSON typed: createLocationImage(newId, { sourceUrl, category, validateOnly })
-  //   2. JSON raw: createLocationImageRaw(newId, body, { validateOnly })
-  //   3. Multipart (matches what Semrush's own UI does): server fetches
-  //      `multipartUrl`, wraps as multipart/form-data with a `file` part,
-  //      POSTs to /images. Confirmed working in their UI; this tests
-  //      whether it works on the public API too.
-  if (!rawBody && !sourceUrl && !multipartUrl) {
-    return NextResponse.json({ error: "Provide `multipartUrl` (multipart mode), `sourceUrl` (typed JSON), or `body` (raw JSON)" }, { status: 400 });
+  // Four modes (in order of preference now that we know the schema):
+  //   1. base64Url (CORRECT): server fetches URL, base64-encodes, POSTs
+  //      JSON { content, type, description? } — confirmed shape per Semrush support
+  //   2. multipart: server fetches URL, wraps as multipart/form-data
+  //      (matches Semrush's UI; rejected by public API)
+  //   3. JSON typed createLocationImage: now requires contentBase64 — only
+  //      reachable from the bulk UI, not directly from the probe
+  //   4. JSON raw `body`: arbitrary literal body — kept for future debugging
+  if (!rawBody && !sourceUrl && !multipartUrl && !base64Url) {
+    return NextResponse.json({
+      error: "Provide `base64Url` (correct mode — server fetches and base64-encodes), or `multipartUrl`/`sourceUrl`/`body` for legacy debugging modes",
+    }, { status: 400 });
   }
 
   let newId = null;
@@ -134,6 +140,60 @@ export async function POST(request) {
     foundLocation = { semrushId: loc.id, name: loc.name };
   } else {
     return NextResponse.json({ error: "Provide shopId or oldLocationId in body" }, { status: 400 });
+  }
+
+  // base64 mode — the confirmed-correct path per Semrush support.
+  // Server fetches the URL, base64-encodes the bytes, sends as
+  // { content, type, description? } JSON.
+  if (base64Url) {
+    let contentBase64, contentType, sizeBytes;
+    try {
+      const imgRes = await fetch(base64Url);
+      if (!imgRes.ok) {
+        return NextResponse.json({
+          error: `Failed to fetch base64Url: HTTP ${imgRes.status}`,
+          base64Url,
+        }, { status: 400 });
+      }
+      const arrayBuffer = await imgRes.arrayBuffer();
+      contentBase64 = Buffer.from(arrayBuffer).toString("base64");
+      contentType = imgRes.headers.get("content-type") || "application/octet-stream";
+      sizeBytes = arrayBuffer.byteLength;
+    } catch (e) {
+      return NextResponse.json({ error: `Fetching base64Url failed: ${e.message}` }, { status: 400 });
+    }
+
+    try {
+      const raw = await createLocationImage(newId, { contentBase64, type, description });
+      return NextResponse.json({
+        newId,
+        foundLocation,
+        requestSent: {
+          path: `/locations/${newId}/images`,
+          mode: "base64-json",
+          contentType,
+          sourceSize: sizeBytes,
+          base64Length: contentBase64.length,
+          type,
+          hasDescription: !!description,
+        },
+        raw,
+      });
+    } catch (e) {
+      return NextResponse.json({
+        error: e.message,
+        newId,
+        foundLocation,
+        requestAttempted: {
+          path: `/locations/${newId}/images`,
+          mode: "base64-json",
+          contentType,
+          sourceSize: sizeBytes,
+          base64Length: contentBase64.length,
+          type,
+        },
+      }, { status: 502 });
+    }
   }
 
   // Multipart mode — server fetches the image, wraps as multipart/form-data
@@ -185,27 +245,32 @@ export async function POST(request) {
     }
   }
 
-  // JSON mode (existing typed + raw paths)
-  const requestPath = `/locations/${newId}/images${validateOnly ? "?validate_only=true" : ""}`;
-  const sentBody = rawBody ? rawBody : { sourceUrl, category };
+  // Raw-body mode — for any future schema investigation
+  if (rawBody) {
+    const requestPath = `/locations/${newId}/images${validateOnly ? "?validate_only=true" : ""}`;
+    try {
+      const raw = await createLocationImageRaw(newId, rawBody, { validateOnly });
+      return NextResponse.json({
+        newId,
+        foundLocation,
+        requestSent: { path: requestPath, body: rawBody },
+        raw,
+      });
+    } catch (e) {
+      return NextResponse.json({
+        error: e.message,
+        newId,
+        foundLocation,
+        requestAttempted: { path: requestPath, body: rawBody, validateOnly },
+      }, { status: 502 });
+    }
+  }
 
-  try {
-    const raw = rawBody
-      ? await createLocationImageRaw(newId, rawBody, { validateOnly })
-      : await createLocationImage(newId, { sourceUrl, category, validateOnly });
-
+  // sourceUrl path no longer valid — Semrush confirmed the endpoint
+  // requires base64-encoded content, not a URL reference.
+  if (sourceUrl) {
     return NextResponse.json({
-      newId,
-      foundLocation,
-      requestSent: { path: requestPath, body: sentBody },
-      raw,
-    });
-  } catch (e) {
-    return NextResponse.json({
-      error: e.message,
-      newId,
-      foundLocation,
-      requestAttempted: { path: requestPath, body: sentBody, validateOnly },
-    }, { status: 502 });
+      error: "sourceUrl mode no longer supported. Use base64Url (server fetches and base64-encodes) — the endpoint requires inline content per Semrush support.",
+    }, { status: 400 });
   }
 }
