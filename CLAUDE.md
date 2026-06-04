@@ -19,9 +19,22 @@ Required env vars (see `.env.example`):
 - `SEMRUSH_API_KEY` — optional. Enables the "rich" fields (description, categories, coordinates, social) via the newer local API. This is a **different credential type** from the Bearer token above — pulled from the Semrush Subscription Info page, not OAuth. Without it those fields are read-only / unavailable.
 - `POSTGRES_URL` / `DATABASE_URL` (any of the four Vercel Postgres vars) — optional. Without it `lib/db.js` falls back to in-memory storage seeded from `DEMO_USERS` and `ACTIVITY_LOG`.
 
-To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`, `lm_pending_pushes`, `lm_gbp_photo_pushes`), an admin must POST `/api/db` once after deploying with the env var set. `CREATE TABLE IF NOT EXISTS` everywhere, so re-running is always safe.
+To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`, `lm_pending_pushes`, `lm_gbp_photo_pushes`, `lm_image_pushes`), an admin must POST `/api/db` once after deploying with the env var set. `CREATE TABLE IF NOT EXISTS` everywhere, so re-running is always safe.
 
 `lm_oauth_tokens` (added because Semrush rotates the refresh_token on use, invalidating the env-var one after the first successful refresh) is loaded lazily by [lib/semrush.js](lib/semrush.js) `ensureTokensLoaded()` on the first API call per worker, and re-written by `setTokens()` on every successful refresh. Env vars are a one-time bootstrap — once the row exists, DB wins. Admin recovery surface: `GET/POST/DELETE /api/admin/semrush-tokens` (POST accepts the same `{access_token, refresh_token, expires_in}` shape that `scripts/get-semrush-token.mjs` prints, so you can rotate without redeploying).
+
+### Bulk listing-photo push (active feature)
+
+[/dashboard/listings-photos](app/dashboard/listings-photos/page.js) pushes one image to every shop in a brand via Semrush's rich-API image endpoint. Same `Authorization: Apikey` auth as the rest of [lib/semrush-rich.js](lib/semrush-rich.js). Reaches every directory Semrush distributes to (Google, Bing, Yelp, Apple Maps, Facebook, etc.).
+
+Schema discovered through extensive probing — see the saved memory `semrush-image-endpoint-schema.md` for the dead-end list. Confirmed shape (via Semrush support):
+- Endpoint: `POST /apis/v4/local/v1/locations/{location_id}/images`
+- Body: `{ content: <base64>, type: "PHOTO", description? }` — **base64-encoded inline JSON**, NOT URL reference, NOT multipart
+- Response: `{ id, url, type, createDate }` — `url` is a `storage.googleapis.com` storage URL
+
+The page accepts either a pasted URL or a drag-drop upload (Vercel Blob — requires `BLOB_READ_WRITE_TOKEN` env). The bulk-image route at [app/api/semrush/bulk-image/route.js](app/api/semrush/bulk-image/route.js) fetches the source URL **once**, base64-encodes **once**, then loops over the brand's shops (those with `semrush_new_id` populated) with a 250ms throttle between requests. Each push records to `lm_image_pushes` (PENDING → SUCCESS|FAILED) for the history panel and audit log.
+
+Shops without a `semrush_new_id` mapping are reported as "skipped" — run the rich-mappings sync on the Admin page to enable them. The endpoint does not have a documented category field (LOGO/COVER/ADDITIONAL) — uploaded images default to whatever Semrush's downstream classification assigns.
 
 ### GBP integration (Phase 0 scaffolding present, deeper phases pending)
 
