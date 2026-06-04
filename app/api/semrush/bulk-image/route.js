@@ -3,6 +3,13 @@ import { verifyToken } from "@/lib/auth";
 import { createLocationImage } from "@/lib/semrush-rich";
 import { recordImagePush, resolveImagePush, getShopNumberMap } from "@/lib/db";
 
+// Bump the Vercel function timeout from the 60s Pro default to 90s.
+// Each per-shop call typically takes 1-2s (250ms throttle + Semrush
+// response). At 30 shops/batch we expect ~32s of work; the extra
+// headroom absorbs slow shops or transient Semrush latency without
+// killing the batch midway. Pro accounts can go up to 300s if needed.
+export const maxDuration = 90;
+
 /**
  * POST /api/semrush/bulk-image
  *
