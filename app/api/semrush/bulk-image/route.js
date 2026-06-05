@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
-import { createLocationImage } from "@/lib/semrush-rich";
+import { createLocationImage, listLocationImages } from "@/lib/semrush-rich";
 import { recordImagePush, resolveImagePush, getShopNumberMap } from "@/lib/db";
+
+// If an image POST appears to fail, do one GET on the shop's images and
+// check whether a fresh image was added in this window. We hit a pattern
+// with ~1.4MB payloads where Semrush returned 400 "Invalid request" but
+// actually stored the image — verify-after-fail rescues those.
+const VERIFY_WINDOW_SECONDS = 60;
 
 // Bump the Vercel function timeout from the 60s Pro default to 90s.
 // Each per-shop call typically takes 1-2s (250ms throttle + Semrush
@@ -140,17 +146,52 @@ export async function POST(request) {
       });
       succeeded++;
     } catch (error) {
-      failed++;
       const errMsg = error.message || String(error);
-      if (pushId) {
-        await resolveImagePush(pushId, { success: false, errorMessage: errMsg });
+      const pushedAtMs = Date.now();
+
+      // Verify-after-fail: under load Semrush sometimes returns a 400
+      // "Invalid request" body after actually storing the image (see
+      // memory). Before marking FAILED, do one GET to see if our image
+      // landed within the verify window. If so, mark SUCCESS instead.
+      let actuallyLanded = null;
+      try {
+        const existing = await listLocationImages(shop.semrush_new_id);
+        const items = Array.isArray(existing?.data) ? existing.data : [];
+        // Find an image whose createDate is within the verify window.
+        // Semrush returns ISO-like strings; parseable with Date.
+        for (const it of items) {
+          const created = it?.createDate ? new Date(it.createDate).getTime() : NaN;
+          if (!isNaN(created) && Math.abs(pushedAtMs - created) < VERIFY_WINDOW_SECONDS * 1000) {
+            actuallyLanded = it;
+            break;
+          }
+        }
+      } catch (_verifyErr) {
+        // GET also failed — fall through to genuine failure recording.
       }
-      if (errors.length < 50) {
-        errors.push({
-          shopId: shop.shop_id,
-          semrushNewId: shop.semrush_new_id,
-          error: errMsg,
-        });
+
+      if (actuallyLanded) {
+        if (pushId) {
+          await resolveImagePush(pushId, {
+            success: true,
+            semrushImageId: actuallyLanded.id || null,
+            semrushImageUrl: actuallyLanded.url || null,
+          });
+        }
+        succeeded++;
+        // Quietly absorb — this isn't a real failure for the user.
+      } else {
+        failed++;
+        if (pushId) {
+          await resolveImagePush(pushId, { success: false, errorMessage: errMsg });
+        }
+        if (errors.length < 50) {
+          errors.push({
+            shopId: shop.shop_id,
+            semrushNewId: shop.semrush_new_id,
+            error: errMsg,
+          });
+        }
       }
     }
 
@@ -186,9 +227,10 @@ export async function GET(request) {
   const url = new URL(request.url);
   const brand = url.searchParams.get("brand") || null;
   const state = url.searchParams.get("state") || null;
+  const sourceUrl = url.searchParams.get("sourceUrl") || null;
   const limit = parseInt(url.searchParams.get("limit") || "100", 10);
 
   const { getImagePushes } = await import("@/lib/db");
-  const rows = await getImagePushes({ brand, state, limit });
+  const rows = await getImagePushes({ brand, state, sourceUrl, limit });
   return NextResponse.json({ rows, count: rows.length });
 }

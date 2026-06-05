@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
 import { put } from "@vercel/blob";
+import sharp from "sharp";
+
+// Resize images down so Semrush's image endpoint reliably accepts the
+// payload. We hit a pattern where ~1.4MB images caused most batched
+// pushes to silently return 400 "Invalid request" despite the image
+// landing on Semrush. Smaller payloads stop tripping it.
+const RESIZE_MAX_EDGE_PX = 1200;
+const JPEG_QUALITY = 85;
 
 /**
  * POST /api/upload-image-blob
@@ -56,18 +64,72 @@ export async function POST(request) {
   }
 
   try {
+    // Resize via sharp. Preserves aspect ratio; only downscales (never upscales).
+    // PNG inputs stay PNG so logo transparency is preserved; JPEG/WebP become
+    // JPEG since downstream directories most reliably display JPEG.
+    const originalBuffer = Buffer.from(await file.arrayBuffer());
+    const inputMeta = await sharp(originalBuffer).metadata();
+
+    const needsResize = (inputMeta.width || 0) > RESIZE_MAX_EDGE_PX || (inputMeta.height || 0) > RESIZE_MAX_EDGE_PX;
+    const keepAsPng = file.type === "image/png";
+
+    let processedBuffer;
+    let outputContentType;
+    let outputExt;
+
+    if (needsResize || !keepAsPng) {
+      let pipeline = sharp(originalBuffer).resize({
+        width: RESIZE_MAX_EDGE_PX,
+        height: RESIZE_MAX_EDGE_PX,
+        fit: "inside",
+        withoutEnlargement: true,
+      });
+      if (keepAsPng) {
+        pipeline = pipeline.png({ compressionLevel: 9 });
+        outputContentType = "image/png";
+        outputExt = "png";
+      } else {
+        pipeline = pipeline.jpeg({ quality: JPEG_QUALITY, mozjpeg: true });
+        outputContentType = "image/jpeg";
+        outputExt = "jpg";
+      }
+      processedBuffer = await pipeline.toBuffer();
+    } else {
+      // Already within size limits and PNG — pass through unchanged.
+      processedBuffer = originalBuffer;
+      outputContentType = file.type;
+      outputExt = file.type === "image/png" ? "png" : file.type === "image/jpeg" ? "jpg" : "webp";
+    }
+
+    const outputMeta = await sharp(processedBuffer).metadata();
+
     // Random suffix so two admins uploading the same filename don't collide.
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_") || "image";
-    const blob = await put(`listings-photos/${Date.now()}-${safeName}`, file, {
-      access: "public",
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
+    const safeName = file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9._-]/g, "_") || "image";
+    const blob = await put(
+      `listings-photos/${Date.now()}-${safeName}.${outputExt}`,
+      processedBuffer,
+      {
+        access: "public",
+        contentType: outputContentType,
+        token: process.env.BLOB_READ_WRITE_TOKEN,
+      }
+    );
+
     return NextResponse.json({
       success: true,
       url: blob.url,
       pathname: blob.pathname,
-      size: file.size,
-      contentType: file.type,
+      contentType: outputContentType,
+      // Surface enough info that the page can show a clear preview/comparison
+      // ("Resized from 1.4 MB → 320 KB · 1024×768").
+      originalSize: file.size,
+      originalContentType: file.type,
+      originalWidth: inputMeta.width || null,
+      originalHeight: inputMeta.height || null,
+      resizedSize: processedBuffer.length,
+      resizedWidth: outputMeta.width || null,
+      resizedHeight: outputMeta.height || null,
+      wasResized: processedBuffer.length !== originalBuffer.length || outputContentType !== file.type,
     });
   } catch (error) {
     console.error("Vercel Blob upload error:", error.message);

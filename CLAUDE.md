@@ -32,9 +32,16 @@ Schema discovered through extensive probing — see the saved memory `semrush-im
 - Body: `{ content: <base64>, type: "PHOTO", description? }` — **base64-encoded inline JSON**, NOT URL reference, NOT multipart
 - Response: `{ id, url, type, createDate }` — `url` is a `storage.googleapis.com` storage URL
 
-The page accepts either a pasted URL or a drag-drop upload (Vercel Blob — requires `BLOB_READ_WRITE_TOKEN` env). The bulk-image route at [app/api/semrush/bulk-image/route.js](app/api/semrush/bulk-image/route.js) fetches the source URL **once**, base64-encodes **once**, then loops over the brand's shops (those with `semrush_new_id` populated) with a 250ms throttle between requests. Each push records to `lm_image_pushes` (PENDING → SUCCESS|FAILED) for the history panel and audit log.
+The page accepts either a pasted URL or a drag-drop upload (Vercel Blob — requires `BLOB_READ_WRITE_TOKEN` env). The bulk-image route at [app/api/semrush/bulk-image/route.js](app/api/semrush/bulk-image/route.js) fetches the source URL **once**, base64-encodes **once**, then loops over the brand's shops (those with `semrush_new_id` populated) with a 250ms throttle between requests. Each push records to `lm_image_pushes` (PENDING → SUCCESS|FAILED) for the history panel and audit log. Client batches at 30 shops/call to stay under Vercel's 60s Pro function timeout (route also bumps `maxDuration = 90`).
 
 Shops without a `semrush_new_id` mapping are reported as "skipped" — run the rich-mappings sync on the Admin page to enable them. The endpoint does not have a documented category field (LOGO/COVER/ADDITIONAL) — uploaded images default to whatever Semrush's downstream classification assigns.
+
+Three reliability features built atop the push because Semrush's image endpoint has rough edges:
+
+- **Server-side resize on upload** ([app/api/upload-image-blob/route.js](app/api/upload-image-blob/route.js)) — sharp resizes anything over 1200px on the long edge (JPEG q85, PNG preserved for transparency). 1.4 MB uploads were tripping Semrush's parser into a generic 400 "Invalid request" even when the image actually landed; resizing to under 500 KB usually makes Semrush respond cleanly. The page shows a preview thumbnail and "Resized from X → Y" metadata before push so the admin can verify.
+- **Verify-after-fail** in the bulk-image route — after each FAILED POST, the route does a GET on the shop's images and looks for one with a `createDate` within ~60 seconds of the push. If found, the row is flipped to SUCCESS with the Semrush image_id + URL captured. Catches the "Semrush stored it but returned a 400" pattern automatically going forward.
+- **Audit endpoint** at [app/api/admin/audit-image-pushes](app/api/admin/audit-image-pushes/route.js) (admin-only "Audit Failed" button on the page) — retroactively runs the same verify check across recent FAILED rows. Used to clean up history from before verify-after-fail was added.
+- **Skip-mode** in the push UI (default ON) — at run start, the client asks the server for shops with a SUCCESS row matching the exact source URL, filters them out. Re-uploading the same file gets a new Vercel Blob URL (timestamp in path), so a "redo with resized image" workflow correctly bypasses skip-mode.
 
 ### GBP integration (Phase 0 scaffolding present, deeper phases pending)
 

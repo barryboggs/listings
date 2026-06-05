@@ -41,6 +41,13 @@ export default function ListingsPhotosPage() {
   const [brandFilter, setBrandFilter] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [description, setDescription] = useState("");
+  // Metadata returned by /api/upload-image-blob — drives the preview block.
+  // { url, contentType, originalSize, originalWidth, originalHeight,
+  //   resizedSize, resizedWidth, resizedHeight, wasResized }
+  const [uploadMeta, setUploadMeta] = useState(null);
+
+  const [skipAlreadyPushed, setSkipAlreadyPushed] = useState(true);
+  const [auditing, setAuditing] = useState(false);
 
   const [uploadingFile, setUploadingFile] = useState(false);
   const [uploadError, setUploadError] = useState(null);
@@ -139,11 +146,45 @@ export default function ListingsPhotosPage() {
         return;
       }
       setSourceUrl(data.url);
-      showToast(`Uploaded ${file.name} → ${Math.round(file.size / 1024)} KB`);
+      setUploadMeta(data);
+      const sizeKb = Math.round((data.resizedSize || file.size) / 1024);
+      const note = data.wasResized
+        ? `Resized to ${sizeKb} KB (${data.resizedWidth}×${data.resizedHeight})`
+        : `${sizeKb} KB`;
+      showToast(`Uploaded ${file.name} — ${note}`);
     } catch (e) {
       setUploadError(`Upload failed: ${e.message}`);
     }
     setUploadingFile(false);
+  };
+
+  const handleClearUpload = () => {
+    setSourceUrl("");
+    setUploadMeta(null);
+    setUploadError(null);
+  };
+
+  const handleAudit = async () => {
+    if (!confirm("Audit recent FAILED image pushes? This checks Semrush to find ones that actually succeeded and updates the history.")) return;
+    setAuditing(true);
+    try {
+      const body = brandFilter ? { brand: brandFilter, hoursBack: 24 } : { hoursBack: 24 };
+      const res = await fetch("/api/admin/audit-image-pushes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || "Audit failed", true);
+      } else {
+        showToast(`Audit: scanned ${data.scanned}, fixed ${data.fixed}, still failed ${data.stillFailed}`);
+        fetchHistory(brandFilter);
+      }
+    } catch (e) {
+      showToast(`Audit error: ${e.message}`, true);
+    }
+    setAuditing(false);
   };
 
   const handleDrop = (e) => {
@@ -161,7 +202,7 @@ export default function ListingsPhotosPage() {
     // Build eligible-shop list locally so we can chunk and track progress
     // without depending on the server to enumerate. Server still filters
     // defensively, but the count drives the batch math here.
-    const eligibleShops = shops.filter((s) => s.brand === brandFilter && s.semrush_new_id);
+    let eligibleShops = shops.filter((s) => s.brand === brandFilter && s.semrush_new_id);
     if (eligibleShops.length === 0) {
       showToast("No eligible shops for that brand", true);
       return;
@@ -170,6 +211,39 @@ export default function ListingsPhotosPage() {
     setPushing(true);
     setStopping(false);
     cancelRef.current = false;
+
+    // Skip-mode: ask the server which shops already have a SUCCESS row
+    // for this exact source URL, filter them out. Source URL identity is
+    // the dedup key — re-uploading the same file produces a new URL
+    // (Vercel Blob includes a timestamp), so a "redo with resized image"
+    // workflow correctly bypasses skip-mode.
+    let prePushSkipped = 0;
+    if (skipAlreadyPushed) {
+      try {
+        const params = new URLSearchParams({
+          brand: brandFilter,
+          state: "SUCCESS",
+          sourceUrl,
+          limit: "5000",
+        });
+        const res = await fetch(`/api/semrush/bulk-image?${params.toString()}`);
+        const data = await res.json();
+        const alreadyShopIds = new Set((data.rows || []).map((r) => String(r.shop_id)));
+        const before = eligibleShops.length;
+        eligibleShops = eligibleShops.filter((s) => !alreadyShopIds.has(String(s.shop_id)));
+        prePushSkipped = before - eligibleShops.length;
+        if (prePushSkipped > 0) {
+          showToast(`Skip-mode: ${prePushSkipped} shops already received this image — skipping`);
+        }
+      } catch (e) {
+        showToast(`Skip-mode lookup failed: ${e.message}. Pushing to all eligible.`, true);
+      }
+      if (eligibleShops.length === 0) {
+        setPushing(false);
+        showToast("All shops already received this image — nothing to push", false);
+        return;
+      }
+    }
 
     const allShopIds = eligibleShops.map((s) => s.shop_id);
     const batches = chunkArray(allShopIds, BATCH_SIZE);
@@ -330,13 +404,62 @@ export default function ListingsPhotosPage() {
           </p>
         )}
 
+        {/* Preview block — shows the actual image Semrush will receive */}
+        {sourceUrl && (
+          <div className="mb-3 p-3 rounded-md flex items-start gap-3" style={{ background: "#0c0c0e", border: "1px solid #2a2a2e" }}>
+            <img
+              src={sourceUrl}
+              alt="Preview"
+              style={{ width: 80, height: 80, objectFit: "cover", borderRadius: 4, background: "#1a1a1d", border: "1px solid #222", flexShrink: 0 }}
+              onError={(e) => { e.currentTarget.style.display = "none"; }}
+            />
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-white truncate">Preview — this is what Semrush will receive</div>
+              {uploadMeta ? (
+                <div className="text-[11px] mt-1" style={{ color: "#888" }}>
+                  {uploadMeta.wasResized ? (
+                    <>
+                      <span style={{ color: "#34d399" }}>Resized</span>: {Math.round(uploadMeta.originalSize / 1024)} KB
+                      {uploadMeta.originalWidth ? ` (${uploadMeta.originalWidth}×${uploadMeta.originalHeight})` : ""}
+                      {" → "}
+                      {Math.round(uploadMeta.resizedSize / 1024)} KB
+                      {uploadMeta.resizedWidth ? ` (${uploadMeta.resizedWidth}×${uploadMeta.resizedHeight})` : ""}
+                      {" · "}
+                      <span style={{ color: "#aaa" }}>{uploadMeta.contentType}</span>
+                    </>
+                  ) : (
+                    <>
+                      {Math.round((uploadMeta.resizedSize || uploadMeta.originalSize) / 1024)} KB
+                      {uploadMeta.resizedWidth ? ` (${uploadMeta.resizedWidth}×${uploadMeta.resizedHeight})` : ""}
+                      {" · "}
+                      <span style={{ color: "#aaa" }}>{uploadMeta.contentType}</span>
+                      {" · No resize needed"}
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="text-[11px] mt-1" style={{ color: "#666" }}>
+                  Pasted URL — no resize applied. If the image is large ({"> 1 MB"}) consider uploading instead so the server can resize.
+                </div>
+              )}
+              <button
+                onClick={handleClearUpload}
+                className="text-[10px] mt-1.5 px-2 py-0.5 rounded"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa" }}
+              >
+                Replace
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* URL field — populated by the upload OR pasted directly */}
         <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#777" }}>
           Source URL (or paste one)
         </label>
         <input
           value={sourceUrl}
-          onChange={(e) => setSourceUrl(e.target.value)}
+          onChange={(e) => { setSourceUrl(e.target.value); setUploadMeta(null); }}
           placeholder="https://… (any publicly-fetchable image URL)"
           className="w-full px-3 py-2 rounded-md text-xs font-mono mb-3"
           style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#ddd" }}
@@ -396,7 +519,7 @@ export default function ListingsPhotosPage() {
 
       {/* Push button */}
       <div className="flex items-center justify-between p-5 rounded-xl mb-5" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
-        <div>
+        <div className="flex-1 min-w-0 pr-4">
           <div className="text-sm font-semibold text-white">
             {brandFilter && selectedBrandStats
               ? `Push to ${selectedBrandStats.eligible} ${selectedBrandStats.config.name} shop${selectedBrandStats.eligible === 1 ? "" : "s"}`
@@ -407,6 +530,16 @@ export default function ListingsPhotosPage() {
               ? `Runs in batches of ${BATCH_SIZE} shops to stay under Vercel's 60s function timeout. ${Math.ceil(selectedBrandStats.eligible / BATCH_SIZE)} batches · ~${Math.ceil(selectedBrandStats.eligible * 1.05 / 60)} min wall-clock. Keep this tab open.`
               : "Image upload + brand selection + at least one eligible shop are required."}
           </p>
+          <label className="flex items-center gap-1.5 mt-2 text-[11px] cursor-pointer" style={{ color: "#aaa" }}>
+            <input
+              type="checkbox"
+              checked={skipAlreadyPushed}
+              onChange={(e) => setSkipAlreadyPushed(e.target.checked)}
+              style={{ accentColor: "#93c5fd" }}
+            />
+            Skip shops that already received this exact image
+            <span style={{ color: "#555", fontWeight: "normal" }} className="ml-1">(matches by source URL)</span>
+          </label>
         </div>
         <div className="flex gap-2">
           {pushing && (
@@ -506,13 +639,31 @@ export default function ListingsPhotosPage() {
               </span>
             )}
           </h4>
-          <button
-            onClick={() => fetchHistory(brandFilter)}
-            className="px-3 py-1 rounded text-[11px] font-semibold"
-            style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa" }}
-          >
-            Refresh
-          </button>
+          <div className="flex gap-2">
+            {currentUser?.role === "admin" && (
+              <button
+                onClick={handleAudit}
+                disabled={auditing}
+                title="Check recent FAILED rows against Semrush; flip to SUCCESS for ones the image actually landed on."
+                className="px-3 py-1 rounded text-[11px] font-semibold"
+                style={{
+                  background: "#1c1c1f",
+                  border: "1px solid #2a2a2e",
+                  color: auditing ? "#666" : "#93c5fd",
+                  opacity: auditing ? 0.6 : 1,
+                }}
+              >
+                {auditing ? "Auditing…" : "Audit Failed"}
+              </button>
+            )}
+            <button
+              onClick={() => fetchHistory(brandFilter)}
+              className="px-3 py-1 rounded text-[11px] font-semibold"
+              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa" }}
+            >
+              Refresh
+            </button>
+          </div>
         </div>
         {historyLoading ? (
           <div className="py-8 text-center text-xs" style={{ color: "#666" }}>Loading…</div>
