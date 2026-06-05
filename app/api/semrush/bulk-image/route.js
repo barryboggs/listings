@@ -9,13 +9,33 @@ import { recordImagePush, resolveImagePush, getShopNumberMap } from "@/lib/db";
 // actually stored the image — verify-after-fail rescues those.
 const VERIFY_WINDOW_SECONDS = 60;
 
-// Semrush returns createDate as "2026-06-02T18:25:46.485" — bare ISO
-// with no timezone marker. JS Date parses these inconsistently (local
-// vs UTC). Force UTC by appending Z if missing.
+// Semrush returns timestamps as bare ISO strings with no timezone marker;
+// force UTC by appending Z if missing.
 function parseSemrushDate(str) {
   if (!str || typeof str !== "string") return NaN;
   const hasTimezone = /[Zz]$/.test(str) || /[+-]\d{2}:?\d{2}$/.test(str);
   return new Date(hasTimezone ? str : `${str}Z`).getTime();
+}
+
+// POST returns `createDate` but the GET list response uses a different
+// field name (audit diagnostics revealed this — createDate was always
+// null). Try common candidates in order of likelihood.
+const DATE_FIELD_CANDIDATES = [
+  "createDate", "createdAt", "created_at", "created",
+  "creation_date", "creationDate", "dateCreated", "uploadDate",
+  "updatedAt", "updated_at",
+];
+
+function extractCreatedTime(imageObj) {
+  if (!imageObj) return NaN;
+  for (const field of DATE_FIELD_CANDIDATES) {
+    const val = imageObj[field];
+    if (val) {
+      const time = parseSemrushDate(val);
+      if (!isNaN(time)) return time;
+    }
+  }
+  return NaN;
 }
 
 // Bump the Vercel function timeout from the 60s Pro default to 90s.
@@ -166,9 +186,11 @@ export async function POST(request) {
       try {
         const existing = await listLocationImages(shop.semrush_new_id);
         const items = Array.isArray(existing?.data) ? existing.data : [];
-        // Find an image whose createDate is within the verify window.
+        // Find an image whose creation timestamp is within the verify
+        // window. Tries multiple date field names since the GET response
+        // uses a different one from the POST response.
         for (const it of items) {
-          const created = parseSemrushDate(it?.createDate);
+          const created = extractCreatedTime(it);
           if (!isNaN(created) && Math.abs(pushedAtMs - created) < VERIFY_WINDOW_SECONDS * 1000) {
             actuallyLanded = it;
             break;

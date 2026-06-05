@@ -33,12 +33,33 @@ const DEFAULT_HOURS_BACK = 24;
 // being so wide that unrelated images falsely match.
 const DEFAULT_VERIFY_WINDOW_MINUTES = 360;
 
-// Semrush returns createDate as a bare ISO string with no timezone marker;
+// Semrush returns timestamps as bare ISO strings with no timezone marker;
 // JS Date parses these inconsistently across runtimes. Force UTC.
 function parseSemrushDate(str) {
   if (!str || typeof str !== "string") return NaN;
   const hasTimezone = /[Zz]$/.test(str) || /[+-]\d{2}:?\d{2}$/.test(str);
   return new Date(hasTimezone ? str : `${str}Z`).getTime();
+}
+
+// POST response uses `createDate` but the GET list response may use a
+// different field name. Try common candidates in order of likelihood.
+// Whichever one parses to a valid time first, use it.
+const DATE_FIELD_CANDIDATES = [
+  "createDate", "createdAt", "created_at", "created",
+  "creation_date", "creationDate", "dateCreated", "uploadDate",
+  "updatedAt", "updated_at",
+];
+
+function extractCreatedTime(imageObj) {
+  if (!imageObj) return { time: NaN, field: null, rawValue: null };
+  for (const field of DATE_FIELD_CANDIDATES) {
+    const val = imageObj[field];
+    if (val) {
+      const time = parseSemrushDate(val);
+      if (!isNaN(time)) return { time, field, rawValue: val };
+    }
+  }
+  return { time: NaN, field: null, rawValue: null };
 }
 
 export async function POST(request) {
@@ -99,14 +120,16 @@ export async function POST(request) {
       let landed = null;
       let closestGapMinutes = null;
       let closestCreateDate = null;
+      let closestDateField = null;
       for (const it of items) {
-        const created = parseSemrushDate(it?.createDate);
+        const { time: created, field, rawValue } = extractCreatedTime(it);
         if (isNaN(created) || !pushedAtMs) continue;
         const gapMs = Math.abs(created - pushedAtMs);
         const gapMin = gapMs / 60000;
         if (closestGapMinutes === null || gapMin < closestGapMinutes) {
           closestGapMinutes = gapMin;
-          closestCreateDate = it.createDate;
+          closestCreateDate = rawValue;
+          closestDateField = field;
         }
         if (gapMs < windowMs) {
           landed = it;
@@ -130,7 +153,11 @@ export async function POST(request) {
             pushedAt: row.pushed_at,
             imagesOnShop: items.length,
             closestImageCreateDate: closestCreateDate,
+            closestDateField,
             closestGapMinutes: closestGapMinutes !== null ? Math.round(closestGapMinutes) : null,
+            // First image as a sample so we can see what fields are
+            // actually on the GET response when none match.
+            sampleImage: items[0] || null,
           });
         }
       }
