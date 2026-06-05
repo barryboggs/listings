@@ -9,6 +9,15 @@ import { recordImagePush, resolveImagePush, getShopNumberMap } from "@/lib/db";
 // actually stored the image — verify-after-fail rescues those.
 const VERIFY_WINDOW_SECONDS = 60;
 
+// Semrush returns createDate as "2026-06-02T18:25:46.485" — bare ISO
+// with no timezone marker. JS Date parses these inconsistently (local
+// vs UTC). Force UTC by appending Z if missing.
+function parseSemrushDate(str) {
+  if (!str || typeof str !== "string") return NaN;
+  const hasTimezone = /[Zz]$/.test(str) || /[+-]\d{2}:?\d{2}$/.test(str);
+  return new Date(hasTimezone ? str : `${str}Z`).getTime();
+}
+
 // Bump the Vercel function timeout from the 60s Pro default to 90s.
 // Each per-shop call typically takes 1-2s (250ms throttle + Semrush
 // response). At 30 shops/batch we expect ~32s of work; the extra
@@ -158,9 +167,8 @@ export async function POST(request) {
         const existing = await listLocationImages(shop.semrush_new_id);
         const items = Array.isArray(existing?.data) ? existing.data : [];
         // Find an image whose createDate is within the verify window.
-        // Semrush returns ISO-like strings; parseable with Date.
         for (const it of items) {
-          const created = it?.createDate ? new Date(it.createDate).getTime() : NaN;
+          const created = parseSemrushDate(it?.createDate);
           if (!isNaN(created) && Math.abs(pushedAtMs - created) < VERIFY_WINDOW_SECONDS * 1000) {
             actuallyLanded = it;
             break;

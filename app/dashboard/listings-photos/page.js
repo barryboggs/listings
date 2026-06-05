@@ -175,8 +175,14 @@ export default function ListingsPhotosPage() {
         body: JSON.stringify(body),
       });
       const data = await res.json();
+      // Always log the full response — when fixed=0 the diagnostics field
+      // shows what the closest Semrush image's createDate was per row.
+      console.log("Audit result:", data);
       if (!res.ok) {
         showToast(data.error || "Audit failed", true);
+      } else if (data.fixed === 0 && data.scanned > 0) {
+        showToast(`Scanned ${data.scanned} — no fixes. Check console for diagnostics (closest image gap per shop).`, true);
+        fetchHistory(brandFilter);
       } else {
         showToast(`Audit: scanned ${data.scanned}, fixed ${data.fixed}, still failed ${data.stillFailed}`);
         fetchHistory(brandFilter);

@@ -28,7 +28,18 @@ import { getImagePushes, resolveImagePush } from "@/lib/db";
 export const maxDuration = 90;
 
 const DEFAULT_HOURS_BACK = 24;
-const DEFAULT_VERIFY_WINDOW_MINUTES = 60;
+// Wider than the live verify-after-fail (60s) because audit may run
+// hours after the original push. 6 hours covers most cases without
+// being so wide that unrelated images falsely match.
+const DEFAULT_VERIFY_WINDOW_MINUTES = 360;
+
+// Semrush returns createDate as a bare ISO string with no timezone marker;
+// JS Date parses these inconsistently across runtimes. Force UTC.
+function parseSemrushDate(str) {
+  if (!str || typeof str !== "string") return NaN;
+  const hasTimezone = /[Zz]$/.test(str) || /[+-]\d{2}:?\d{2}$/.test(str);
+  return new Date(hasTimezone ? str : `${str}Z`).getTime();
+}
 
 export async function POST(request) {
   const token = request.cookies.get("auth-token")?.value;
@@ -68,6 +79,11 @@ export async function POST(request) {
   let fixed = 0;
   let stillFailed = 0;
   const errors = [];
+  // For each row that DIDN'T match, capture diagnostic data so we can
+  // see exactly why: how many images Semrush returned, and the closest
+  // image's createDate vs our pushed_at. Helps debug verify-window or
+  // timezone mismatches.
+  const diagnostics = [];
 
   for (const row of candidates) {
     if (!row.semrush_new_id) {
@@ -81,9 +97,18 @@ export async function POST(request) {
       const windowMs = verifyWindowMinutes * 60 * 1000;
 
       let landed = null;
+      let closestGapMinutes = null;
+      let closestCreateDate = null;
       for (const it of items) {
-        const created = it?.createDate ? new Date(it.createDate).getTime() : NaN;
-        if (!isNaN(created) && pushedAtMs && Math.abs(created - pushedAtMs) < windowMs) {
+        const created = parseSemrushDate(it?.createDate);
+        if (isNaN(created) || !pushedAtMs) continue;
+        const gapMs = Math.abs(created - pushedAtMs);
+        const gapMin = gapMs / 60000;
+        if (closestGapMinutes === null || gapMin < closestGapMinutes) {
+          closestGapMinutes = gapMin;
+          closestCreateDate = it.createDate;
+        }
+        if (gapMs < windowMs) {
           landed = it;
           break;
         }
@@ -98,6 +123,16 @@ export async function POST(request) {
         fixed++;
       } else {
         stillFailed++;
+        if (diagnostics.length < 20) {
+          diagnostics.push({
+            shopId: row.shop_id,
+            semrushNewId: row.semrush_new_id,
+            pushedAt: row.pushed_at,
+            imagesOnShop: items.length,
+            closestImageCreateDate: closestCreateDate,
+            closestGapMinutes: closestGapMinutes !== null ? Math.round(closestGapMinutes) : null,
+          });
+        }
       }
     } catch (e) {
       stillFailed++;
@@ -112,6 +147,7 @@ export async function POST(request) {
     fixed,
     stillFailed,
     errors,
+    diagnostics,
     auditWindow: { hoursBack, verifyWindowMinutes, brand, sourceUrl },
   });
 }
