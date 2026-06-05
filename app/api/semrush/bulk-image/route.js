@@ -17,11 +17,12 @@ function parseSemrushDate(str) {
   return new Date(hasTimezone ? str : `${str}Z`).getTime();
 }
 
-// POST returns `createDate` but the GET list response uses a different
-// field name (audit diagnostics revealed this — createDate was always
-// null). Try common candidates in order of likelihood.
+// Confirmed empirically: GET response uses `create_date` (snake, with
+// underscore between "create" and "date"). POST response uses `createDate`
+// (camel). They're inconsistent within the same Semrush API. Other
+// candidates kept as fallbacks for any future variations.
 const DATE_FIELD_CANDIDATES = [
-  "createDate", "createdAt", "created_at", "created",
+  "create_date", "createDate", "createdAt", "created_at", "created",
   "creation_date", "creationDate", "dateCreated", "uploadDate",
   "updatedAt", "updated_at",
 ];

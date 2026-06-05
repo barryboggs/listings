@@ -28,10 +28,13 @@ import { getImagePushes, resolveImagePush } from "@/lib/db";
 export const maxDuration = 90;
 
 const DEFAULT_HOURS_BACK = 24;
-// Wider than the live verify-after-fail (60s) because audit may run
-// hours after the original push. 6 hours covers most cases without
-// being so wide that unrelated images falsely match.
-const DEFAULT_VERIFY_WINDOW_MINUTES = 360;
+// 5-minute window — wide enough to absorb clock skew + Semrush
+// processing delay, narrow enough to NOT falsely match images from
+// other pushes (e.g. test uploads from earlier in the day). Initial
+// audit run with a 6h window would have falsely "fixed" rows whose
+// shops happened to have any image at all, which is misleading.
+// Caller can override via verifyWindowMinutes if they need broader.
+const DEFAULT_VERIFY_WINDOW_MINUTES = 5;
 
 // Semrush returns timestamps as bare ISO strings with no timezone marker;
 // JS Date parses these inconsistently across runtimes. Force UTC.
@@ -41,11 +44,12 @@ function parseSemrushDate(str) {
   return new Date(hasTimezone ? str : `${str}Z`).getTime();
 }
 
-// POST response uses `createDate` but the GET list response may use a
-// different field name. Try common candidates in order of likelihood.
-// Whichever one parses to a valid time first, use it.
+// Confirmed empirically: GET response uses `create_date` (snake, with
+// underscore between "create" and "date"). POST response uses `createDate`
+// (camel). They're inconsistent within the same Semrush API. Other
+// candidates kept as fallbacks for any future variations.
 const DATE_FIELD_CANDIDATES = [
-  "createDate", "createdAt", "created_at", "created",
+  "create_date", "createDate", "createdAt", "created_at", "created",
   "creation_date", "creationDate", "dateCreated", "uploadDate",
   "updatedAt", "updated_at",
 ];
