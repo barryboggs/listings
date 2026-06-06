@@ -29,6 +29,27 @@ function chunkArray(arr, size) {
   return out;
 }
 
+/**
+ * Defensive string coercion at render sites. React error #31 fires if you
+ * render an object directly into JSX; sometimes Semrush returns an error
+ * shape like { code, id, message } and that object can leak into our
+ * error rendering path. This converts safely: strings pass through,
+ * non-strings get JSON-serialized so they at least display readably.
+ * Logs to console when a non-string appears so we can trace the source
+ * the next time it happens.
+ */
+function safeRenderable(val) {
+  if (val == null) return "";
+  if (typeof val === "string") return val;
+  if (typeof val === "number" || typeof val === "boolean") return String(val);
+  try {
+    console.warn("[listings-photos] non-string value in error render path", val);
+    return JSON.stringify(val);
+  } catch {
+    return "[unrenderable]";
+  }
+}
+
 export default function ListingsPhotosPage() {
   const currentUser = useUser();
   const fileInputRef = useRef(null);
@@ -141,7 +162,7 @@ export default function ListingsPhotosPage() {
         if (res.status === 503) {
           setUploadError("Vercel Blob not configured. Paste a public URL instead, or ask an admin to set BLOB_READ_WRITE_TOKEN.");
         } else {
-          setUploadError(data.error || `Upload failed (HTTP ${res.status})`);
+          setUploadError(safeRenderable(data?.error) || `Upload failed (HTTP ${res.status})`);
         }
         return;
       }
@@ -179,7 +200,7 @@ export default function ListingsPhotosPage() {
       // shows what the closest Semrush image's createDate was per row.
       console.log("Audit result:", data);
       if (!res.ok) {
-        showToast(data.error || "Audit failed", true);
+        showToast(safeRenderable(data?.error) || "Audit failed", true);
       } else if (data.fixed === 0 && data.scanned > 0) {
         showToast(`Scanned ${data.scanned} — no fixes. Check console for diagnostics (closest image gap per shop).`, true);
         fetchHistory(brandFilter);
@@ -299,19 +320,30 @@ export default function ListingsPhotosPage() {
           totalSkipped += data.skipped || 0;
           if (Array.isArray(data.errors)) {
             for (const err of data.errors) {
-              if (allErrors.length < 200) allErrors.push(err);
+              if (allErrors.length < 200) {
+                // Normalize at ingest so anything downstream is safe to
+                // render. Some Semrush error responses come back as
+                // { code, id, message } objects; coerce to a readable string.
+                allErrors.push({
+                  shopId: safeRenderable(err?.shopId),
+                  error: safeRenderable(err?.error),
+                });
+              }
             }
           }
         } else {
           totalFailed += batches[i].length;
           if (allErrors.length < 200) {
-            allErrors.push({ shopId: `batch-${i + 1}`, error: data.error || `HTTP ${res.status}` });
+            allErrors.push({
+              shopId: `batch-${i + 1}`,
+              error: safeRenderable(data?.error) || `HTTP ${res.status}`,
+            });
           }
         }
       } catch (e) {
         totalFailed += batches[i].length;
         if (allErrors.length < 200) {
-          allErrors.push({ shopId: `batch-${i + 1}`, error: e.message });
+          allErrors.push({ shopId: `batch-${i + 1}`, error: safeRenderable(e?.message || e) });
         }
       }
     }
@@ -624,8 +656,8 @@ export default function ListingsPhotosPage() {
               <div className="space-y-0.5 max-h-40 overflow-auto">
                 {batchProgress.errors.slice(0, 30).map((e, i) => (
                   <div key={i} className="text-[10px] flex gap-2 font-mono">
-                    <span style={{ color: "#93c5fd" }}>#{e.shopId}</span>
-                    <span style={{ color: "#f87171" }} className="flex-1 min-w-0 truncate">{e.error}</span>
+                    <span style={{ color: "#93c5fd" }}>#{safeRenderable(e.shopId)}</span>
+                    <span style={{ color: "#f87171" }} className="flex-1 min-w-0 truncate">{safeRenderable(e.error)}</span>
                   </div>
                 ))}
               </div>
@@ -730,7 +762,7 @@ export default function ListingsPhotosPage() {
                     )}
                     {row.error_message && (
                       <div className="text-[10px] font-mono mt-1" style={{ color: "#f87171" }}>
-                        {row.error_message}
+                        {safeRenderable(row.error_message)}
                       </div>
                     )}
                   </div>
