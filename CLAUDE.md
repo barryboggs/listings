@@ -19,7 +19,7 @@ Required env vars (see `.env.example`):
 - `SEMRUSH_API_KEY` — optional. Enables the "rich" fields (description, categories, coordinates, social) via the newer local API. This is a **different credential type** from the Bearer token above — pulled from the Semrush Subscription Info page, not OAuth. Without it those fields are read-only / unavailable.
 - `POSTGRES_URL` / `DATABASE_URL` (any of the four Vercel Postgres vars) — optional. Without it `lib/db.js` falls back to in-memory storage seeded from `DEMO_USERS` and `ACTIVITY_LOG`.
 
-To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`, `lm_pending_pushes`, `lm_gbp_photo_pushes`, `lm_image_pushes`), an admin must POST `/api/db` once after deploying with the env var set. `CREATE TABLE IF NOT EXISTS` everywhere, so re-running is always safe.
+To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`, `lm_pending_pushes`, `lm_gbp_photo_pushes`, `lm_image_pushes`, `lm_integration_secrets`), an admin must POST `/api/db` once after deploying with the env var set. `CREATE TABLE IF NOT EXISTS` everywhere, so re-running is always safe.
 
 `lm_oauth_tokens` (added because Semrush rotates the refresh_token on use, invalidating the env-var one after the first successful refresh) is loaded lazily by [lib/semrush.js](lib/semrush.js) `ensureTokensLoaded()` on the first API call per worker, and re-written by `setTokens()` on every successful refresh. Env vars are a one-time bootstrap — once the row exists, DB wins. Admin recovery surface: `GET/POST/DELETE /api/admin/semrush-tokens` (POST accepts the same `{access_token, refresh_token, expires_in}` shape that `scripts/get-semrush-token.mjs` prints, so you can rotate without redeploying).
 
@@ -42,6 +42,20 @@ Three reliability features built atop the push because Semrush's image endpoint 
 - **Verify-after-fail** in the bulk-image route — after each FAILED POST, the route does a GET on the shop's images and looks for one with a `createDate` within ~60 seconds of the push. If found, the row is flipped to SUCCESS with the Semrush image_id + URL captured. Catches the "Semrush stored it but returned a 400" pattern automatically going forward.
 - **Audit endpoint** at [app/api/admin/audit-image-pushes](app/api/admin/audit-image-pushes/route.js) (admin-only "Audit Failed" button on the page) — retroactively runs the same verify check across recent FAILED rows. Used to clean up history from before verify-after-fail was added.
 - **Skip-mode** in the push UI (default ON) — at run start, the client asks the server for shops with a SUCCESS row matching the exact source URL, filters them out. Re-uploading the same file gets a new Vercel Blob URL (timestamp in path), so a "redo with resized image" workflow correctly bypasses skip-mode.
+
+### Integration token broker
+
+External apps (e.g. a coworker's local script for an unrelated project) can fetch the current Semrush access token via `GET /api/integrations/semrush-access-token` without ever holding the refresh-token chain. Solves the multi-consumer problem where two apps sharing the same OAuth refresh token destroy each other's chain on every rotation.
+
+How it works:
+- Admin generates a 48-char bearer secret on `/dashboard/admin` (Integration Token Broker section). Plaintext shown once, stored as bcrypt hash in `lm_integration_secrets`.
+- External app sends `Authorization: Bearer <secret>` on each call. Verification is bcrypt-compare against the hash.
+- This app's broker route checks the current access token; if it's expiring within 5 minutes, refreshes proactively using the existing `refreshAccessToken()` (which is coalesced and persists to DB). Returns `{ access_token, expires_at, expires_in_seconds }` — never the refresh token.
+- Every successful access logs to `lm_activity` (action: "Token broker access") so unusual spikes (leaked secret) are visible.
+
+Rotation: admin clicks Rotate Secret on the admin page. The old secret becomes invalid immediately on the next call (single hash row per provider, replaced via `ON CONFLICT DO UPDATE`). External app must be re-keyed.
+
+Implementation lives in [app/api/integrations/semrush-access-token/route.js](app/api/integrations/semrush-access-token/route.js) (the broker endpoint), [app/api/admin/integration-broker-secret/route.js](app/api/admin/integration-broker-secret/route.js) (admin GET/POST/DELETE), and `set/verify/getMeta/clearIntegrationSecret` helpers in [lib/db.js](lib/db.js). [lib/semrush.js](lib/semrush.js) exports `getAccessToken()` so the broker can read the cached value without leaking `tokenCache` itself.
 
 ### GBP integration (Phase 0 scaffolding present, deeper phases pending)
 
