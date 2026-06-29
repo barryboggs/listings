@@ -202,7 +202,11 @@ export default function HolidayImportPage() {
       batches: batchesRun,
       totalBatches,
       stopped,
-      errors: allErrors.length > 0 ? allErrors.slice(0, 20) : undefined,
+      // Keep ALL errors — earlier 20-item slice meant users with high error
+      // counts (e.g. 100 errors) only saw the first 20 with no way to
+      // recover the rest for re-submission. The Copy-CSV and Copy-Shop-IDs
+      // buttons below export whatever's in this array.
+      errors: allErrors.length > 0 ? allErrors : undefined,
     });
     setPushing(false);
     setStopping(false);
