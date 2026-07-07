@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
-import { getNewIdForOldId, logActivity } from "@/lib/db";
+import { logActivity } from "@/lib/db";
 import {
   getRichLocation,
   getRichStatus,
@@ -12,22 +12,19 @@ import {
 /**
  * GET /api/semrush/rich/[id]
  *
- * The [id] path segment is the OLD-API location id (what EditModal has on
- * hand). This route looks up the corresponding new-API location_id via
- * the lm_shop_numbers mapping, fetches the rich payload, and returns the
- * app-shaped subset (description, categories, coordinates, featured
- * message, social handles, etc.).
+ * Post-migration `[id]` IS the rich-API location_id (same as everywhere
+ * else). Kept as a distinct route from `/api/semrush/locations/[id]?raw=1`
+ * because EditModal's Extras tab calls this specific URL — retained for
+ * compatibility. New code should read rich fields directly from the
+ * app-shape location object built by appLocationFromRich().
  *
  * Query params:
- *   ?raw=1  (admin only) — also includes the unfiltered upstream payload
- *           in `raw` alongside the transformed `rich`. Diagnostic — used
- *           when we suspect Semrush exposes fields we don't yet surface
- *           (e.g. per-directory website URLs).
+ *   ?raw=1  (admin only) — includes the unfiltered upstream payload
+ *           in `raw` alongside the transformed `rich`. Diagnostic.
  *
  * Response shapes:
  *   200 — { rich: { ...transformRichLocation output... }, raw?: {...} }
- *   200 — { rich: null, reason: "no_mapping" | "no_apikey" }
- *         (these are user-facing-warnable states, not errors)
+ *   200 — { rich: null, reason: "no_apikey" }
  *   502 — { error } (upstream API error)
  */
 export async function GET(request, { params }) {
@@ -36,18 +33,15 @@ export async function GET(request, { params }) {
   const user = await verifyToken(token);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { id: oldId } = params;
-  if (!oldId) {
-    return NextResponse.json({ error: "id is required" }, { status: 400 });
-  }
+  const { id } = params;
+  if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
 
   const wantRaw = new URL(request.url).searchParams.get("raw") === "1";
   if (wantRaw && user.role !== "admin") {
     return NextResponse.json({ error: "Admin required for raw=1" }, { status: 403 });
   }
 
-  const richStatus = getRichStatus();
-  if (!richStatus.hasKey) {
+  if (!getRichStatus().hasKey) {
     return NextResponse.json({
       rich: null,
       reason: "no_apikey",
@@ -55,35 +49,22 @@ export async function GET(request, { params }) {
     });
   }
 
-  const newId = await getNewIdForOldId(oldId);
-  if (!newId) {
-    return NextResponse.json({
-      rich: null,
-      reason: "no_mapping",
-      message: "No new-API mapping for this location. Run the rich-field mapping sync on /dashboard/admin.",
-    });
-  }
-
   try {
-    const raw = await getRichLocation(newId);
+    const raw = await getRichLocation(id);
     return NextResponse.json(
       wantRaw
         ? { rich: transformRichLocation(raw), raw }
         : { rich: transformRichLocation(raw) }
     );
   } catch (error) {
-    return NextResponse.json(
-      { error: error.message, newId },
-      { status: 502 }
-    );
+    return NextResponse.json({ error: error.message }, { status: 502 });
   }
 }
 
 /**
  * PATCH /api/semrush/rich/[id]
  *
- * Update rich fields on the new API. `[id]` is still the OLD-API id —
- * we resolve to the new-API location_id via the mapping table.
+ * Update rich fields on the new API. `[id]` is the rich-API location_id.
  *
  * Request body:
  *   { changes: { description?, categoryIds?, coordinates?, featuredMessage?,
@@ -96,9 +77,7 @@ export async function GET(request, { params }) {
  * Only fields present in `changes` are sent in the PATCH — toRichUpdate
  * builds both the payload and the update_mask from the same input keys.
  *
- * Roles: any logged-in user (mirrors the read route). If you want this
- * gated to editors+, add a role check here — for now, viewers can't open
- * EditModal so this is effectively editor-gated by the UI.
+ * Roles: any logged-in user (mirrors the read route). Viewers rejected.
  */
 export async function PATCH(request, { params }) {
   const token = request.cookies.get("auth-token")?.value;
@@ -109,8 +88,8 @@ export async function PATCH(request, { params }) {
     return NextResponse.json({ error: "Viewers cannot edit locations" }, { status: 403 });
   }
 
-  const { id: oldId } = params;
-  if (!oldId) return NextResponse.json({ error: "id is required" }, { status: 400 });
+  const { id } = params;
+  if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
 
   const body = await request.json().catch(() => ({}));
   const changes = body.changes || {};
@@ -128,31 +107,20 @@ export async function PATCH(request, { params }) {
     );
   }
 
-  const newId = await getNewIdForOldId(oldId);
-  if (!newId) {
-    return NextResponse.json(
-      {
-        error: "No new-API mapping for this location. Run the rich-field mapping sync on /dashboard/admin.",
-        reason: "no_mapping",
-      },
-      { status: 404 }
-    );
-  }
-
   const { fields, updateMask } = toRichUpdate(changes);
   if (updateMask.length === 0) {
     return NextResponse.json({ error: "No recognized rich fields in changes" }, { status: 400 });
   }
 
   try {
-    const raw = await updateRichLocation(newId, fields, updateMask, { validateOnly });
+    const raw = await updateRichLocation(id, fields, updateMask, { validateOnly });
     const rich = transformRichLocation(raw);
 
     if (!validateOnly) {
       await logActivity({
         user: user.name,
         action: "Updated rich fields",
-        location: locationName || oldId,
+        location: locationName || id,
         brand: "system",
         details: `Fields: ${updateMask.join(", ")}`,
       });
@@ -161,7 +129,7 @@ export async function PATCH(request, { params }) {
     return NextResponse.json({ rich, updateMask });
   } catch (error) {
     return NextResponse.json(
-      { error: error.message, newId, updateMask },
+      { error: error.message, updateMask },
       { status: 502 }
     );
   }

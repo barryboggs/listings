@@ -1,22 +1,26 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
-import { getAllLocations, getTokenStatus } from "@/lib/semrush";
 import { getAllRichLocations, getRichStatus } from "@/lib/semrush-rich";
-import { bulkSetNewIds, initDatabase, logActivity } from "@/lib/db";
+import {
+  getShopNumbers,
+  bulkSetNewIds,
+  initDatabase,
+  logActivity,
+} from "@/lib/db";
 
 /**
  * POST /api/db/sync-rich-mappings
  *
- * Admin-only. Pulls every location from both Semrush APIs and matches them
- * by website URL, phone, and address — same strategy as the existing
- * shop-number matching. For each match, writes semrush_new_id onto the
- * shop row keyed by semrush_location_id.
+ * Admin-only. Populates lm_shop_numbers.semrush_new_id by matching each
+ * shop record to a rich-API location via URL / phone / normalized address.
  *
- * Idempotent — re-run any time. Locations already mapped are re-matched
+ * Post-migration this is the ONLY sync — the deprecated old-API-to-new-API
+ * cross-reference is gone (the app only speaks to the rich API now).
+ * Idempotent; re-run any time. Shops already mapped are re-matched
  * harmlessly.
  *
- * Response: { oldCount, newCount, matched, updated, missing, ambiguous,
- *             strategies: { url, phone, address }, unmatchedOld }
+ * Response: { newCount, shopCount, matched, updated, missing, ambiguous,
+ *             strategies: { url, phone, address }, unmatchedShops }
  */
 export async function POST(request) {
   const token = request.cookies.get("auth-token")?.value;
@@ -26,46 +30,34 @@ export async function POST(request) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403 });
   }
 
-  const oldStatus = getTokenStatus();
   const richStatus = getRichStatus();
-  if (!oldStatus.hasToken) {
-    return NextResponse.json(
-      { error: "SEMRUSH_BEARER_TOKEN not configured — cannot fetch old-API locations" },
-      { status: 412 }
-    );
-  }
   if (!richStatus.hasKey) {
     return NextResponse.json(
-      { error: "SEMRUSH_API_KEY not configured — cannot fetch new-API locations" },
+      { error: "SEMRUSH_API_KEY not configured — cannot fetch locations" },
       { status: 412 }
     );
   }
 
-  // Ensure the schema is up to date — adds semrush_new_id / rich_matched_at
-  // columns if they're missing (CREATE TABLE / ALTER TABLE statements are
-  // all idempotent). Without this, sync runs against a stale schema would
-  // silently fail every UPDATE with "column does not exist".
+  // Ensure schema is up to date. Adds semrush_new_id / rich_matched_at
+  // columns if they're missing (all statements idempotent).
   await initDatabase();
 
-  let oldLocations;
   let richLocations;
+  let shops;
   try {
-    [oldLocations, richLocations] = await Promise.all([
-      getAllLocations(),
+    [richLocations, shops] = await Promise.all([
       getAllRichLocations({ limit: 50 }),
+      getShopNumbers(),
     ]);
   } catch (error) {
-    return NextResponse.json(
-      { error: `Fetch failed: ${error.message}` },
-      { status: 502 }
-    );
+    return NextResponse.json({ error: `Fetch failed: ${error.message}` }, { status: 502 });
   }
 
-  const oldCount = oldLocations.length;
   const newCount = richLocations.length;
+  const shopCount = shops.length;
 
-  // Build lookup indexes on the rich (new-API) list. Each key is the strongest
-  // available match signal; we look up old locations against each in turn.
+  // Build lookup indexes on the rich locations. Same match-strength ordering
+  // as the previous shop matcher: URL beats phone beats address+city.
   const richByUrl = new Map();
   const richByPhone = new Map();
   const richByAddrCity = new Map();
@@ -92,13 +84,13 @@ export async function POST(request) {
 
   const matches = [];
   const strategies = { url: 0, phone: 0, address: 0 };
-  const unmatchedOld = [];
+  const unmatchedShops = [];
   let ambiguous = 0;
 
-  for (const o of oldLocations) {
-    const url = normalizeUrl(o.websiteUrl);
-    const phone = normalizePhone(o.phone);
-    const addrCity = addrCityKey(o.address, o.city);
+  for (const shop of shops) {
+    const url = normalizeUrl(shop.website);
+    const phone = normalizePhone(shop.phone);
+    const addrCity = addrCityKey(shop.street_address, shop.city);
 
     let hit = null;
     let by = null;
@@ -118,37 +110,51 @@ export async function POST(request) {
     }
 
     if (hit) {
-      matches.push({ oldId: o.id, newId: hit.location_id });
+      // bulkSetNewIds keys by shop's semrush_location_id; but post-migration
+      // most shops may not have that populated. Fall back to shop_id-based
+      // update for those. We collect both variants and let bulkSetNewIds /
+      // downstream logic pick the right update key.
+      matches.push({
+        oldId: shop.semrush_location_id || null,
+        newId: hit.location_id,
+        shopId: shop.shop_id,
+      });
       strategies[by]++;
     } else {
-      if (unmatchedOld.length < 50) unmatchedOld.push({ id: o.id, name: o.locationName, city: o.city });
+      if (unmatchedShops.length < 50) {
+        unmatchedShops.push({ shopId: shop.shop_id, brand: shop.brand, city: shop.city });
+      }
     }
   }
 
-  const { updated, missing, errors } = await bulkSetNewIds(matches);
+  // bulkSetNewIds updates rows keyed by semrush_location_id (old-API ID).
+  // For shops that lack an old-API ID (never had one) we skip DB writes
+  // via bulkSetNewIds and use a shop_id-keyed setter instead. The
+  // helper below applies whichever key exists.
+  const { updated, missing, errors } = await applyRichMatches(matches);
 
   await logActivity({
     user: user.name,
     action: "Synced rich-field mappings",
     location: "",
     brand: "system",
-    details: `${matches.length} matched (url:${strategies.url} phone:${strategies.phone} addr:${strategies.address}); ${updated} shop rows updated, ${missing} matched but no shop row, ${unmatchedOld.length === 50 ? "50+" : oldCount - matches.length} unmatched.`,
+    details: `${matches.length} matched (url:${strategies.url} phone:${strategies.phone} addr:${strategies.address}); ${updated} shop rows updated, ${missing} matched but no shop row.`,
   });
 
   return NextResponse.json({
-    oldCount,
     newCount,
+    shopCount,
     matched: matches.length,
     updated,
     missing,
     ambiguous,
     strategies,
-    unmatchedOld,
+    unmatchedShops,
     dbErrors: errors,
   });
 }
 
-// GET /api/db/sync-rich-mappings — return current sync status (no work done)
+// GET /api/db/sync-rich-mappings — return sync readiness (no work done)
 export async function GET(request) {
   const token = request.cookies.get("auth-token")?.value;
   if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -156,13 +162,47 @@ export async function GET(request) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   return NextResponse.json({
-    oldApi: getTokenStatus().hasToken,
     richApi: getRichStatus().hasKey,
   });
 }
 
+/**
+ * Prefer the bulkSetNewIds path (old-API-ID keyed) for shops that have it —
+ * that keeps the historical linkage intact. For shops without an old-API
+ * ID we can't use bulkSetNewIds, so fall back to a shop_id-keyed update via
+ * setNewIdByShopId (added to lib/db.js as part of the migration).
+ */
+async function applyRichMatches(matches) {
+  const oldIdMatches = matches
+    .filter((m) => m.oldId)
+    .map(({ oldId, newId }) => ({ oldId, newId }));
+  const shopIdOnlyMatches = matches.filter((m) => !m.oldId);
+
+  const oldRes = await bulkSetNewIds(oldIdMatches);
+
+  let extraUpdated = 0;
+  const extraErrors = [];
+  if (shopIdOnlyMatches.length > 0) {
+    const { setNewIdByShopId } = await import("@/lib/db");
+    for (const { shopId, newId } of shopIdOnlyMatches) {
+      try {
+        const ok = await setNewIdByShopId(shopId, newId);
+        if (ok) extraUpdated++;
+      } catch (e) {
+        if (extraErrors.length < 3) extraErrors.push(`${shopId}: ${e.message}`);
+      }
+    }
+  }
+
+  return {
+    updated: oldRes.updated + extraUpdated,
+    missing: oldRes.missing,
+    errors: [...oldRes.errors, ...extraErrors],
+  };
+}
+
 // ---------------------------------------------------------------------------
-// Normalization — match the rules used by the existing shop matcher in
+// Normalization — matches the rules used by the existing shop matcher in
 // app/api/shops/route.js so behavior stays consistent across the codebase.
 // ---------------------------------------------------------------------------
 
@@ -172,7 +212,7 @@ function normalizeUrl(url) {
     .toLowerCase()
     .replace(/^https?:\/\//, "")
     .replace(/^www\./, "")
-    .replace(/\?.*$/, "") // drop query params (utm_* etc.)
+    .replace(/\?.*$/, "")
     .replace(/\/$/, "")
     .trim();
 }

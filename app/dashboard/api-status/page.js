@@ -44,9 +44,8 @@ export default function ApiStatusPage() {
     setDbInitializing(false);
   };
 
-  // /api/semrush/token returns { oldApi, richApi, mode } as of Phase 4.
-  // Each API blob carries a `state`: healthy | failing | untested | no_token/no_key.
-  const oldApi = apiStatus?.oldApi || {};
+  // /api/semrush/token returns { oldApi, richApi, mode }. Post-migration
+  // only richApi is meaningful — oldApi always reports no_token.
   const richApi = apiStatus?.richApi || {};
 
   const STATE_DISPLAY = {
@@ -56,29 +55,16 @@ export default function ApiStatusPage() {
     no_token: { label: "Not Set", color: "#fbbf24" },
     no_key: { label: "Not Set", color: "#fbbf24" },
   };
-  const oldDisplay = STATE_DISPLAY[oldApi.state] || { label: apiStatus ? "—" : "Checking…", color: "#666" };
   const richDisplay = STATE_DISPLAY[richApi.state] || { label: apiStatus ? "—" : "Checking…", color: "#666" };
 
   const fmtTime = (ts) => (ts ? new Date(ts).toLocaleString() : null);
-
-  const oldDetail = !apiStatus
-    ? "Checking connection…"
-    : oldApi.state === "healthy"
-    ? oldApi.lastSuccessAt
-      ? `Last success: ${fmtTime(oldApi.lastSuccessAt)}`
-      : "Pulling from Semrush API"
-    : oldApi.state === "failing"
-    ? oldApi.lastErrorMessage || "Last call failed"
-    : oldApi.state === "untested"
-    ? "Token set — no calls made yet this session"
-    : "Set SEMRUSH_BEARER_TOKEN in .env.local";
 
   const richDetail = !apiStatus
     ? "Checking connection…"
     : richApi.state === "healthy"
     ? richApi.lastSuccessAt
       ? `Last success: ${fmtTime(richApi.lastSuccessAt)}`
-      : "Rich fields available"
+      : "Semrush API responding"
     : richApi.state === "failing"
     ? richApi.lastErrorMessage || "Last call failed"
     : richApi.state === "untested"
@@ -86,13 +72,14 @@ export default function ApiStatusPage() {
     : "Set SEMRUSH_API_KEY in .env.local";
 
   const endpoints = [
-    { method: "GET", path: "/external/locations/:locationId", rate: "10 req/sec", desc: "Get a single location by ID", status: "ok" },
-    { method: "GET", path: "/external/locations", rate: "10 req/sec", desc: "List all locations (paginated)", status: "ok" },
-    { method: "PUT", path: "/external/locations/:locationId", rate: "5 req/sec", desc: "Update a single location", status: "ok" },
-    { method: "PUT", path: "/external/locations", rate: "5 req/min", desc: "Bulk update up to 50 locations", status: "ok" },
+    { method: "GET", path: "/local/v1/locations", rate: "50 per page", desc: "List all locations (offset/limit)", status: "ok" },
+    { method: "GET", path: "/local/v1/locations/:location_id", rate: "—", desc: "Get a single location by ID", status: "ok" },
+    { method: "PATCH", path: "/local/v1/locations/:location_id", rate: "—", desc: "Update a location (fields via update_mask)", status: "ok" },
+    { method: "POST", path: "/local/v1/locations/:location_id/images", rate: "—", desc: "Upload a listing photo", status: "ok" },
+    { method: "GET", path: "/local/v1/categories", rate: "24h cache", desc: "Category catalog for the picker", status: "ok" },
   ];
 
-  const methodColors = { GET: "#34d399", PUT: "#fbbf24", POST: "#93c5fd", DELETE: "#f87171" };
+  const methodColors = { GET: "#34d399", PUT: "#fbbf24", PATCH: "#fbbf24", POST: "#93c5fd", DELETE: "#f87171" };
 
   return (
     <>
@@ -106,8 +93,7 @@ export default function ApiStatusPage() {
       {/* Status cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {[
-          { label: "Old API (Bearer)", value: oldDisplay.label, detail: oldDetail, color: oldDisplay.color },
-          { label: "Rich API (Apikey)", value: richDisplay.label, detail: richDetail, color: richDisplay.color },
+          { label: "Semrush API", value: richDisplay.label, detail: richDetail, color: richDisplay.color },
           { label: "Last Check", value: lastPing, detail: "Polled every 60 seconds", color: apiStatus ? "#34d399" : "#f87171" },
           { label: "Database", value: dbStatus?.hasPostgres ? "Postgres" : "Memory", detail: dbStatus?.hasPostgres ? "Vercel Postgres connected" : "In-memory (resets on cold start)", color: dbStatus?.hasPostgres ? "#34d399" : "#fbbf24" },
         ].map((card) => (
@@ -263,37 +249,25 @@ export default function ApiStatusPage() {
                 <span style={{ color: "#555" }}>↓</span>
               </div>
 
-              {/* Credentials layer — two server-side API surfaces */}
+              {/* Credentials layer — single API key */}
               <div className="flex items-center gap-3">
-                <div className="flex gap-2" style={{ minWidth: "290px" }}>
-                  <div className="px-3 py-2 rounded-md text-center flex-1" style={{ background: "#fbbf2420", border: "1px solid #fbbf2440", color: "#fbbf24" }}>
-                    <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">Bearer Token</div>
-                    <div className="text-[10px] font-normal" style={{ color: "#fbbf24aa" }}>Old API · OAuth</div>
-                  </div>
-                  <div className="px-3 py-2 rounded-md text-center flex-1" style={{ background: "#6ee7b720", border: "1px solid #6ee7b740", color: "#6ee7b7" }}>
-                    <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">Apikey</div>
-                    <div className="text-[10px] font-normal" style={{ color: "#6ee7b7aa" }}>Rich API · key</div>
-                  </div>
+                <div className="px-3 py-2 rounded-md text-center" style={{ background: "#6ee7b720", border: "1px solid #6ee7b740", color: "#6ee7b7", minWidth: "140px" }}>
+                  <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">Apikey</div>
+                  <div className="text-[10px] font-normal" style={{ color: "#6ee7b7aa" }}>SEMRUSH_API_KEY · never rotates</div>
                 </div>
                 <div className="flex-1 border-t border-dashed" style={{ borderColor: "#333" }} />
-                <span className="text-[10px]" style={{ color: "#555" }}>Server-side only · 2 credentials</span>
+                <span className="text-[10px]" style={{ color: "#555" }}>Server-side only</span>
               </div>
 
               <div className="flex justify-center">
                 <span style={{ color: "#555" }}>↓</span>
               </div>
 
-              {/* Semrush layer — two Listing Management API surfaces */}
+              {/* Semrush layer — v4/local API only */}
               <div className="flex items-center gap-3">
-                <div className="flex gap-2" style={{ minWidth: "290px" }}>
-                  <div className="px-3 py-2 rounded-md text-center flex-1" style={{ background: "#f9731620", border: "1px solid #f9731640", color: "#f97316" }}>
-                    <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">v4-raw API</div>
-                    <div className="text-[10px] font-normal" style={{ color: "#f97316aa" }}>Deprecated · bulk + CRUD</div>
-                  </div>
-                  <div className="px-3 py-2 rounded-md text-center flex-1" style={{ background: "#f9731620", border: "1px solid #f9731640", color: "#f97316" }}>
-                    <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">v4/local API</div>
-                    <div className="text-[10px] font-normal" style={{ color: "#f97316aa" }}>Rich fields · no bulk</div>
-                  </div>
+                <div className="px-3 py-2 rounded-md text-center" style={{ background: "#f9731620", border: "1px solid #f9731640", color: "#f97316", minWidth: "140px" }}>
+                  <div className="text-[10px] uppercase tracking-wider font-bold mb-0.5">v4/local API</div>
+                  <div className="text-[10px] font-normal" style={{ color: "#f97316aa" }}>CRUD + rich fields + images</div>
                 </div>
                 <div className="flex-1 border-t border-dashed" style={{ borderColor: "#333" }} />
                 <span className="text-[10px]" style={{ color: "#555" }}>→ 70+ directories</span>

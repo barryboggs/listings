@@ -322,24 +322,15 @@ export default function AdminPage() {
   const [syncResult, setSyncResult] = useState(null);
   const [createdCredential, setCreatedCredential] = useState(null);
 
-  // Token-broker state — admin UI for the integration secret used by
-  // external apps (e.g. Ben's local scripts) to fetch the Semrush
-  // access token via /api/integrations/semrush-access-token.
-  const [brokerMeta, setBrokerMeta] = useState(null); // { configured, hint, createdAt, createdBy, lastUsedAt }
-  const [newBrokerSecret, setNewBrokerSecret] = useState(null); // one-time plaintext display
-  const [rotatingBroker, setRotatingBroker] = useState(false);
-
-  // Fetch users, brands, and broker meta on mount
+  // Fetch users and brands on mount
   useEffect(() => {
     Promise.all([
       fetch("/api/users").then((r) => r.json()),
       fetch("/api/semrush/locations").then((r) => r.json()),
-      fetch("/api/admin/integration-broker-secret").then((r) => r.json()).catch(() => null),
     ])
-      .then(([userData, locData, brokerData]) => {
+      .then(([userData, locData]) => {
         setUsers(userData.users || []);
         setBrands(locData.brands || []);
-        if (brokerData) setBrokerMeta(brokerData);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -417,48 +408,6 @@ export default function AdminPage() {
     }
     setSaving(false);
     setEditingUser(undefined);
-  };
-
-  const handleRotateBrokerSecret = async () => {
-    const isRotation = brokerMeta?.configured;
-    const confirmMsg = isRotation
-      ? "Generate a new broker secret? This will immediately invalidate the current one. Anyone using the old secret (Ben's script, etc.) will get 401s until you share the new value."
-      : "Generate the first broker secret? It will be shown ONCE — save it before closing the dialog.";
-    if (!confirm(confirmMsg)) return;
-
-    setRotatingBroker(true);
-    try {
-      const res = await fetch("/api/admin/integration-broker-secret", { method: "POST" });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setNewBrokerSecret(data.plaintext);
-        setBrokerMeta(data.meta);
-        showToast(isRotation ? "Secret rotated — copy the new value" : "Secret generated — copy it now");
-        logActivity(isRotation ? "Rotated integration broker secret" : "Generated integration broker secret", "Provider: semrush");
-      } else {
-        showToast(`${isRotation ? "Rotation" : "Generation"} failed: ${data.error || res.status}`);
-      }
-    } catch (e) {
-      showToast(`Failed: ${e.message}`);
-    }
-    setRotatingBroker(false);
-  };
-
-  const handleRevokeBrokerSecret = async () => {
-    if (!confirm("Revoke the broker secret? External integrations using it will get 401s until you generate a new one.")) return;
-    try {
-      const res = await fetch("/api/admin/integration-broker-secret", { method: "DELETE" });
-      if (res.ok) {
-        setBrokerMeta({ provider: "semrush", configured: false });
-        showToast("Broker secret revoked");
-        logActivity("Revoked integration broker secret", "Provider: semrush");
-      } else {
-        const data = await res.json().catch(() => ({}));
-        showToast(`Revoke failed: ${data.error || res.status}`);
-      }
-    } catch (e) {
-      showToast(`Revoke failed: ${e.message}`);
-    }
   };
 
   const handleSyncRichMappings = async () => {
@@ -592,65 +541,6 @@ export default function AdminPage() {
         )}
       </div>
 
-      {/* Integration Token Broker — for external apps (e.g. Ben's local
-          scripts) that need the current Semrush access token without
-          holding the refresh-token chain themselves. */}
-      <div className="mt-5 p-4 rounded-lg" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <div>
-            <h4 className="text-xs font-bold" style={{ color: "#aaa" }}>Integration Token Broker</h4>
-            <p className="text-[11px] mt-0.5" style={{ color: "#666" }}>
-              External apps can fetch the current Semrush access token via{" "}
-              <span className="font-mono">GET /api/integrations/semrush-access-token</span>{" "}
-              using a bearer secret. They never see the refresh token, so they can&apos;t break the rotation chain.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={handleRotateBrokerSecret}
-              disabled={rotatingBroker}
-              className="px-4 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
-              style={{ background: "#0ea5e9", opacity: rotatingBroker ? 0.5 : 1 }}
-            >
-              {rotatingBroker
-                ? (brokerMeta?.configured ? "Rotating…" : "Generating…")
-                : (brokerMeta?.configured ? "Rotate Secret" : "Generate Secret")}
-            </button>
-            {brokerMeta?.configured && (
-              <button
-                onClick={handleRevokeBrokerSecret}
-                className="px-3 py-2 rounded-md text-xs font-semibold"
-                style={{ background: "#2d0a0a", border: "1px solid #5c1a1a", color: "#f87171" }}
-              >
-                Revoke
-              </button>
-            )}
-          </div>
-        </div>
-        {brokerMeta?.configured ? (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
-            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
-              <div style={{ color: "#888" }}>Hint (last 4 chars)</div>
-              <div className="font-mono text-base font-bold text-white">…{brokerMeta.hint}</div>
-            </div>
-            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
-              <div style={{ color: "#888" }}>Generated</div>
-              <div className="text-white">{brokerMeta.createdAt ? new Date(brokerMeta.createdAt).toLocaleString() : "—"}</div>
-              {brokerMeta.createdBy && <div style={{ color: "#666" }}>by {brokerMeta.createdBy}</div>}
-            </div>
-            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
-              <div style={{ color: "#888" }}>Last used by external app</div>
-              <div className="text-white">{brokerMeta.lastUsedAt ? new Date(brokerMeta.lastUsedAt).toLocaleString() : "Never"}</div>
-            </div>
-          </div>
-        ) : (
-          <p className="text-[11px]" style={{ color: "#666" }}>
-            No broker secret configured. Click <strong>Generate Secret</strong> to issue one. Anyone using{" "}
-            <span className="font-mono">/api/integrations/semrush-access-token</span> currently gets 401.
-          </p>
-        )}
-      </div>
-
       <div className="mt-5 p-4 rounded-lg" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
         <h4 className="text-xs font-bold mb-3" style={{ color: "#aaa" }}>Role Permissions</h4>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -669,74 +559,6 @@ export default function AdminPage() {
       {editingUser !== undefined && <UserModal user={editingUser} brands={brands} onClose={() => setEditingUser(undefined)} onSave={handleSave} saving={saving} />}
       {deletingUser && <DeleteModal user={deletingUser} onClose={() => setDeletingUser(null)} onConfirm={handleDelete} deleting={saving} />}
       {createdCredential && <CredentialModal credential={createdCredential} onClose={() => setCreatedCredential(null)} />}
-      {newBrokerSecret && <BrokerSecretModal secret={newBrokerSecret} onClose={() => setNewBrokerSecret(null)} />}
     </>
-  );
-}
-
-/**
- * One-time-display modal for a newly-generated broker secret. The
- * plaintext is shown here ONCE and never recoverable from the DB
- * afterward (we only store the bcrypt hash). Admin must copy it
- * before closing.
- */
-function BrokerSecretModal({ secret, onClose }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(secret);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard may be unavailable in some contexts — manual copy from the input works.
-    }
-  };
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}>
-      <div className="w-full max-w-[640px] rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #2a2a2e" }}>
-        <div className="px-5 py-4" style={{ borderBottom: "1px solid #2a2a2e" }}>
-          <h3 className="text-base font-semibold text-white">New broker secret generated</h3>
-          <p className="text-xs mt-1" style={{ color: "#aaa" }}>
-            Copy this value now — once you close this dialog it cannot be recovered. Share it with the integration owner via a secure channel (1Password, encrypted message — not Slack/email).
-          </p>
-        </div>
-        <div className="px-5 py-4 space-y-3">
-          <label className="block text-[11px] font-semibold uppercase tracking-wider" style={{ color: "#777" }}>
-            Secret (48 chars)
-          </label>
-          <div className="flex gap-2">
-            <input
-              readOnly
-              value={secret}
-              onFocus={(e) => e.target.select()}
-              className="flex-1 px-3 py-2 rounded-md text-xs font-mono"
-              style={{ background: "#0c0c0e", border: "1px solid #2a2a2e", color: "#ddd" }}
-            />
-            <button
-              onClick={copy}
-              className="px-3 py-2 rounded-md text-xs font-semibold"
-              style={{ background: copied ? "#0d2818" : "#1c1c1f", border: `1px solid ${copied ? "#2d5a2d" : "#2a2a2e"}`, color: copied ? "#34d399" : "#aaa" }}
-            >
-              {copied ? "Copied ✓" : "Copy"}
-            </button>
-          </div>
-          <div className="p-3 rounded-md text-[11px]" style={{ background: "#2d1b0020", border: "1px solid #8b6b2040", color: "#fbbf24" }}>
-            ⚠ Closing this dialog without copying means re-generating the secret. The previous secret is already invalid — any external app using the old one will return 401 until you share the new value.
-          </div>
-          <div className="text-[11px]" style={{ color: "#888" }}>
-            <strong style={{ color: "#aaa" }}>How to use</strong>: external apps send this secret as <span className="font-mono">Authorization: Bearer &lt;secret&gt;</span> when calling <span className="font-mono">GET /api/integrations/semrush-access-token</span>. The response contains the current Semrush access token and its expiry.
-          </div>
-        </div>
-        <div className="px-5 py-4 flex justify-end" style={{ borderTop: "1px solid #2a2a2e" }}>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-md text-xs font-semibold text-white"
-            style={{ background: "#0ea5e9" }}
-          >
-            I&apos;ve copied it, close
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
