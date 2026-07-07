@@ -1,19 +1,20 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
-import { getLocation, updateLocation, getTokenStatus, toSemrushFormat } from "@/lib/semrush";
+import {
+  getRichLocation,
+  updateRichLocation,
+  getRichStatus,
+  appChangesToRichPatch,
+} from "@/lib/semrush-rich";
 import { recordPendingPushes } from "@/lib/db";
 
 /**
  * GET /api/semrush/locations/[id]?raw=1  (admin-only diagnostic)
  *
- * Returns the unfiltered upstream payload from the deprecated API's
- * GetLocation endpoint. Used to probe whether Semrush exposes fields
- * we don't currently surface through transformLocation — specifically,
- * whether per-publisher/per-directory website URLs (e.g. a separate
- * GBP URL) are reachable via the API.
- *
- * Without ?raw=1 the route is a no-op (no transformed shape is needed
- * here — the locations list already returns transformed data).
+ * Returns the unfiltered upstream payload from the rich API's GET
+ * /locations/{id}. Used to probe what fields Semrush is actually
+ * returning for a given location without the app-shape transform in
+ * the way.
  */
 export async function GET(request, { params }) {
   const token = request.cookies.get("auth-token")?.value;
@@ -29,31 +30,39 @@ export async function GET(request, { params }) {
     return NextResponse.json({ error: "Admin required for raw=1" }, { status: 403 });
   }
 
-  const { hasToken } = getTokenStatus();
-  if (!hasToken) {
-    return NextResponse.json({ error: "SEMRUSH_BEARER_TOKEN not configured" }, { status: 412 });
+  const { hasKey } = getRichStatus();
+  if (!hasKey) {
+    return NextResponse.json({ error: "SEMRUSH_API_KEY not configured" }, { status: 412 });
   }
 
   try {
-    const raw = await getLocation(params.id);
+    const raw = await getRichLocation(params.id);
     return NextResponse.json({ raw });
   } catch (error) {
     return NextResponse.json({ error: error.message }, { status: 502 });
   }
 }
 
+/**
+ * PUT /api/semrush/locations/[id]
+ *
+ * Post-migration this is really a PATCH: only fields the client sends in
+ * `body.changes` (if provided) — or all supplied fields (legacy shape) —
+ * are updated. `params.id` is the rich-API location_id.
+ *
+ * Legacy client shape (still supported):
+ *   { name, phone, address, city, ... }  // all top-level = changed
+ * New client shape (preferred):
+ *   { changes: { phone: "+1..." }, brand?, shopId? }  // only phone changes
+ *
+ * The PATCH mask is built from whichever keys are present.
+ */
 export async function PUT(request, { params }) {
-  // Verify auth
   const token = request.cookies.get("auth-token")?.value;
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const user = await verifyToken(token);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Check role permissions
   if (user.role === "viewer") {
     return NextResponse.json({ error: "Viewers cannot edit locations" }, { status: 403 });
   }
@@ -61,36 +70,48 @@ export async function PUT(request, { params }) {
   const locationId = params.id;
   const body = await request.json();
 
-  // Check if Semrush API is configured
-  const { hasToken } = getTokenStatus();
-
-  if (!hasToken) {
-    // Simulate success for demo mode
+  const { hasKey } = getRichStatus();
+  if (!hasKey) {
     return NextResponse.json({
       success: true,
       source: "demo",
       locationId,
-      message: "Demo mode — no actual API call made. Set SEMRUSH_BEARER_TOKEN to go live.",
+      message: "Demo mode — no actual API call made. Set SEMRUSH_API_KEY to go live.",
       updatedBy: user.name,
       updatedAt: new Date().toISOString(),
     });
   }
 
-  // Transform our app data to Semrush API format
-  const semrushPayload = toSemrushFormat(body);
+  // Accept either shape: an explicit `changes` object OR a legacy flat
+  // payload where the whole body is the change set. Strip out non-field
+  // metadata (brand, shopId) so they don't confuse the mask builder.
+  const rawChanges = body.changes && typeof body.changes === "object"
+    ? body.changes
+    : (() => {
+        const { brand, shopId, ...rest } = body;
+        return rest;
+      })();
+
+  const { fields, updateMask } = appChangesToRichPatch(rawChanges);
+
+  if (updateMask.length === 0) {
+    return NextResponse.json(
+      { error: "No editable fields in request. Send at least one field to update." },
+      { status: 400 }
+    );
+  }
 
   try {
-    const result = await updateLocation(locationId, semrushPayload);
+    const result = await updateRichLocation(locationId, fields, updateMask);
 
     // Record in the pending-approval queue so the user can find this shop
     // later in /dashboard/pending-approval without hunting in Semrush.
-    // Fire-and-forget: don't let DB hiccups fail the API response.
     recordPendingPushes([{
       semrushLocationId: locationId,
-      locationName: body.name || "",
+      locationName: rawChanges.name || body.name || "",
       shopId: body.shopId || "",
       brand: body.brand || "",
-      fields: "single edit",
+      fields: `single edit: ${updateMask.join(", ")}`,
       pushedBy: user.name,
     }]).catch((e) => console.error("recordPendingPushes (single):", e.message));
 
@@ -98,6 +119,7 @@ export async function PUT(request, { params }) {
       success: true,
       source: "semrush",
       locationId,
+      updatedFields: updateMask,
       result,
       updatedBy: user.name,
       updatedAt: new Date().toISOString(),
@@ -105,11 +127,7 @@ export async function PUT(request, { params }) {
   } catch (error) {
     console.error("Semrush update error:", error.message);
     return NextResponse.json(
-      {
-        success: false,
-        error: error.message,
-        locationId,
-      },
+      { success: false, error: error.message, locationId },
       { status: 502 }
     );
   }

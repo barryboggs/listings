@@ -1,16 +1,29 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
-import { bulkUpdateLocations, toSemrushFormat } from "@/lib/semrush";
+import {
+  updateRichLocation,
+  getRichStatus,
+  appChangesToRichPatch,
+} from "@/lib/semrush-rich";
 import { recordPendingPushes } from "@/lib/db";
+
+// See /api/semrush/bulk-update — same shape and same reasoning for these.
+export const maxDuration = 90;
+const PATCH_THROTTLE_MS = 250;
 
 /**
  * POST - Push a single batch of holiday hour updates to Semrush.
- * The client calls this repeatedly (one batch at a time) to avoid
- * serverless function timeouts on the free Vercel plan.
  *
- * Body: { updates: [{ loc, holidayHours }] }
- * Each update contains the full location object and the new holiday hours.
- * Max 50 per request (Semrush bulk limit).
+ * Post-migration: loops per-location PATCH on the rich API. The client
+ * (dashboard/holiday-import/page.js) already chunks CSV rows into 50-shop
+ * batches with inter-batch sleeps; this route handles one batch and
+ * throttles per-shop within it.
+ *
+ * Body: { updates: [{ loc, holidayHours, shopId? }] }
+ *   - loc: full app-shape location (must have `id` = rich-API location_id
+ *          and, for the business-hours safety belt, businessHours)
+ *   - holidayHours: array of special-hours entries to apply
+ *   - shopId (optional): Driven Brands shop # for pending-approval record
  */
 export async function POST(request) {
   const token = request.cookies.get("auth-token")?.value;
@@ -29,96 +42,71 @@ export async function POST(request) {
     return NextResponse.json({ error: "Max 50 updates per batch" }, { status: 400 });
   }
 
-  // Build Semrush payloads
-  const semrushPayloads = updates.map((update) => {
-    const loc = update.loc;
-    const payload = toSemrushFormat({
-      name: loc.name,
-      address: loc.address,
-      additionalAddressInfo: loc.additionalAddressInfo,
-      city: loc.city,
-      state: loc.state,
-      zip: loc.zip,
-      phone: loc.phone,
-      website: loc.website,
-      urlParams: loc.urlParams,
-      businessHours: loc.businessHours,
-      holidayHours: update.holidayHours,
-      reopenDate: loc.reopenDate,
+  const { hasKey } = getRichStatus();
+  if (!hasKey) {
+    return NextResponse.json({
+      pushed: 0,
+      pushErrors: updates.length,
+      errors: updates.map((u) => ({
+        locationId: u.loc?.id,
+        shopId: u.shopId || u.loc?.shopId || "unknown",
+        locationName: u.loc?.name || "",
+        error: "SEMRUSH_API_KEY not configured",
+      })),
     });
-    payload.id = loc.id;
-    return payload;
-  });
+  }
 
   let pushed = 0;
   let pushErrors = 0;
   const errors = [];
+  const successPending = [];
 
-  try {
-    const batchResults = await bulkUpdateLocations(semrushPayloads);
+  for (let i = 0; i < updates.length; i++) {
+    const update = updates[i];
+    const loc = update.loc || {};
 
-    const successPending = [];
-    if (Array.isArray(batchResults)) {
-      for (const r of batchResults) {
-        if (r.state === "UPDATED") {
-          pushed++;
-          const update = updates.find((u) => u.loc.id === r.locationId);
-          if (update) {
-            successPending.push({
-              semrushLocationId: r.locationId,
-              locationName: update.loc?.name || "",
-              shopId: update.shopId || update.loc?.shopId || "",
-              brand: update.loc?.brand || "",
-              fields: "holiday_hours (CSV import)",
-              pushedBy: user.name,
-            });
-          }
-        } else {
-          pushErrors++;
-          // Find the shop ID for this location
-          const update = updates.find((u) => u.loc.id === r.locationId);
-          errors.push({
-            locationId: r.locationId,
-            shopId: update?.shopId || "unknown",
-            locationName: update?.loc?.name || "",
-            error: r.error?.message || r.state || "Unknown",
-          });
-        }
-      }
-    } else {
-      pushed = semrushPayloads.length;
-      // Old API shape without per-item results — record all as pending.
-      for (const update of updates) {
-        successPending.push({
-          semrushLocationId: update.loc.id,
-          locationName: update.loc?.name || "",
-          shopId: update.shopId || update.loc?.shopId || "",
-          brand: update.loc?.brand || "",
-          fields: "holiday_hours (CSV import)",
-          pushedBy: user.name,
-        });
-      }
-    }
+    // Holiday-hours-needs-business-hours safety belt — mirrors the old
+    // API's requirement; harmless if rich API doesn't need it.
+    const changes = { holidayHours: update.holidayHours };
+    if (loc.businessHours) changes.businessHours = loc.businessHours;
 
-    // Record successful pushes in the pending-approval queue. Fire-and-forget
-    // so a DB hiccup doesn't fail the batch response.
-    if (successPending.length > 0) {
-      recordPendingPushes(successPending).catch((e) =>
-        console.error("recordPendingPushes (holiday-push):", e.message)
-      );
-    }
-  } catch (error) {
-    // Entire batch failed — report all locations in this batch
-    pushErrors = semrushPayloads.length;
-    for (const update of updates) {
-      errors.push({
-        locationId: update.loc.id,
-        shopId: update.shopId || "unknown",
-        locationName: update.loc?.name || "",
-        error: error.message,
+    const { fields, updateMask } = appChangesToRichPatch(changes);
+
+    try {
+      await updateRichLocation(loc.id, fields, updateMask);
+      pushed++;
+      successPending.push({
+        semrushLocationId: loc.id,
+        locationName: loc.name || "",
+        shopId: update.shopId || loc.shopId || "",
+        brand: loc.brand || "",
+        fields: "holiday_hours (CSV import)",
+        pushedBy: user.name,
       });
+    } catch (err) {
+      pushErrors++;
+      errors.push({
+        locationId: loc.id,
+        shopId: update.shopId || loc.shopId || "unknown",
+        locationName: loc.name || "",
+        error: err.message || "Unknown error",
+      });
+    }
+
+    if (i < updates.length - 1) {
+      await new Promise((r) => setTimeout(r, PATCH_THROTTLE_MS));
     }
   }
 
-  return NextResponse.json({ pushed, pushErrors, errors: errors.length > 0 ? errors : undefined });
+  if (successPending.length > 0) {
+    recordPendingPushes(successPending).catch((e) =>
+      console.error("recordPendingPushes (holiday-push):", e.message)
+    );
+  }
+
+  return NextResponse.json({
+    pushed,
+    pushErrors,
+    errors: errors.length > 0 ? errors : undefined,
+  });
 }

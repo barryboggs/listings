@@ -11,79 +11,51 @@ npm run start    # serve production build
 npm run lint     # next lint
 ```
 
-There is no test framework configured. The project is plain JavaScript (no TypeScript), using Next.js 14 App Router with `jsconfig.json` mapping `@/*` to the repo root (e.g. `import { ... } from "@/lib/semrush"`).
+There is no test framework configured. The project is plain JavaScript (no TypeScript), using Next.js 14 App Router with `jsconfig.json` mapping `@/*` to the repo root (e.g. `import { ... } from "@/lib/semrush-rich"`).
 
 Required env vars (see `.env.example`):
 - `JWT_SECRET` — random ≥32 chars. There is a hardcoded fallback in `lib/auth.js` and `middleware.js`; never rely on it in production.
-- `SEMRUSH_BEARER_TOKEN` — optional. Without it the app runs in **demo mode** (seed data from `lib/data.js`). Obtained via OAuth Device Authorization flow — run `node scripts/get-semrush-token.mjs` to (re)generate.
-- `SEMRUSH_API_KEY` — optional. Enables the "rich" fields (description, categories, coordinates, social) via the newer local API. This is a **different credential type** from the Bearer token above — pulled from the Semrush Subscription Info page, not OAuth. Without it those fields are read-only / unavailable.
+- `SEMRUSH_API_KEY` — required for live mode. Without it the app runs in **demo mode** (seed data from `lib/data.js`). Pulled from the Semrush Subscription Info page. Uses `Authorization: Apikey` header. This is a **long-lived credential** — no rotation, no expiry, no refresh cycle. If it stops working, generate a new one on the Semrush side and update the env var.
 - `POSTGRES_URL` / `DATABASE_URL` (any of the four Vercel Postgres vars) — optional. Without it `lib/db.js` falls back to in-memory storage seeded from `DEMO_USERS` and `ACTIVITY_LOG`.
 
 To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`, `lm_pending_pushes`, `lm_gbp_photo_pushes`, `lm_image_pushes`, `lm_integration_secrets`), an admin must POST `/api/db` once after deploying with the env var set. `CREATE TABLE IF NOT EXISTS` everywhere, so re-running is always safe.
 
-`lm_oauth_tokens` (added because Semrush rotates the refresh_token on use, invalidating the env-var one after the first successful refresh) is loaded lazily by [lib/semrush.js](lib/semrush.js) `ensureTokensLoaded()` on the first API call per worker, and re-written by `setTokens()` on every successful refresh. Env vars are a one-time bootstrap — once the row exists, DB wins. Admin recovery surface: `GET/POST/DELETE /api/admin/semrush-tokens` (POST accepts the same `{access_token, refresh_token, expires_in}` shape that `scripts/get-semrush-token.mjs` prints, so you can rotate without redeploying).
+`lm_oauth_tokens` currently only carries rows for `provider = 'google_bp'` — the Semrush deprecated OAuth flow was retired during the July 2026 API migration. The table remains because the GBP integration scaffold uses it, but no Semrush code paths touch it anymore.
 
-### Bulk listing-photo push (active feature)
+## Migration note (July 2026)
 
-[/dashboard/listings-photos](app/dashboard/listings-photos/page.js) pushes one image to every shop in a brand via Semrush's rich-API image endpoint. Same `Authorization: Apikey` auth as the rest of [lib/semrush-rich.js](lib/semrush-rich.js). Reaches every directory Semrush distributes to (Google, Bing, Yelp, Apple Maps, Facebook, etc.).
+The app used to run against the deprecated `/apis/v4-raw/listing-management/v1` API (OAuth Device Auth, 7-day access-token rotation, refresh-token single-use chain that repeatedly broke in production). Semrush confirmed that endpoint is deprecated and pointed us at `/apis/v4/local/v1` (Apikey auth, no rotation). The whole app now talks to only that API. Retired in the migration:
 
-Schema discovered through extensive probing — see the saved memory `semrush-image-endpoint-schema.md` for the dead-end list. Confirmed shape (via Semrush support):
-- Endpoint: `POST /apis/v4/local/v1/locations/{location_id}/images`
-- Body: `{ content: <base64>, type: "PHOTO", description? }` — **base64-encoded inline JSON**, NOT URL reference, NOT multipart
-- Response: `{ id, url, type, createDate }` — `url` is a `storage.googleapis.com` storage URL
+- `SEMRUSH_BEARER_TOKEN` env var + `SEMRUSH_REFRESH_TOKEN` + `SEMRUSH_CLIENT_ID` + `SEMRUSH_OAUTH_SCOPE`
+- `/api/admin/semrush-tokens` (OAuth token admin surface)
+- `/api/integrations/semrush-access-token` (token broker for external apps — those apps should now hold their own Apikey directly)
+- `/api/admin/integration-broker-secret` (admin surface for the broker)
+- `scripts/get-semrush-token.mjs`, `scripts/reauth-semrush.mjs`, and OAuth diagnostic scripts
+- OAuth exports on `lib/semrush.js` (`getTokenStatus`, `refreshAccessToken`, `setTokens`, `getAccessToken`, `ensureTokensLoaded`, `initiateDeviceAuth`, `pollForToken`)
 
-The page accepts either a pasted URL or a drag-drop upload (Vercel Blob — requires `BLOB_READ_WRITE_TOKEN` env). The bulk-image route at [app/api/semrush/bulk-image/route.js](app/api/semrush/bulk-image/route.js) fetches the source URL **once**, base64-encodes **once**, then loops over the brand's shops (those with `semrush_new_id` populated) with a 250ms throttle between requests. Each push records to `lm_image_pushes` (PENDING → SUCCESS|FAILED) for the history panel and audit log. Client batches at 30 shops/call to stay under Vercel's 60s Pro function timeout (route also bumps `maxDuration = 90`).
-
-Shops without a `semrush_new_id` mapping are reported as "skipped" — run the rich-mappings sync on the Admin page to enable them. The endpoint does not have a documented category field (LOGO/COVER/ADDITIONAL) — uploaded images default to whatever Semrush's downstream classification assigns.
-
-Three reliability features built atop the push because Semrush's image endpoint has rough edges:
-
-- **Server-side resize on upload** ([app/api/upload-image-blob/route.js](app/api/upload-image-blob/route.js)) — sharp resizes anything over 1200px on the long edge (JPEG q85, PNG preserved for transparency). 1.4 MB uploads were tripping Semrush's parser into a generic 400 "Invalid request" even when the image actually landed; resizing to under 500 KB usually makes Semrush respond cleanly. The page shows a preview thumbnail and "Resized from X → Y" metadata before push so the admin can verify.
-- **Verify-after-fail** in the bulk-image route — after each FAILED POST, the route does a GET on the shop's images and looks for one with a `createDate` within ~60 seconds of the push. If found, the row is flipped to SUCCESS with the Semrush image_id + URL captured. Catches the "Semrush stored it but returned a 400" pattern automatically going forward.
-- **Audit endpoint** at [app/api/admin/audit-image-pushes](app/api/admin/audit-image-pushes/route.js) (admin-only "Audit Failed" button on the page) — retroactively runs the same verify check across recent FAILED rows. Used to clean up history from before verify-after-fail was added.
-- **Skip-mode** in the push UI (default ON) — at run start, the client asks the server for shops with a SUCCESS row matching the exact source URL, filters them out. Re-uploading the same file gets a new Vercel Blob URL (timestamp in path), so a "redo with resized image" workflow correctly bypasses skip-mode.
-
-### Integration token broker
-
-External apps (e.g. a coworker's local script for an unrelated project) can fetch the current Semrush access token via `GET /api/integrations/semrush-access-token` without ever holding the refresh-token chain. Solves the multi-consumer problem where two apps sharing the same OAuth refresh token destroy each other's chain on every rotation.
-
-How it works:
-- Admin generates a 48-char bearer secret on `/dashboard/admin` (Integration Token Broker section). Plaintext shown once, stored as bcrypt hash in `lm_integration_secrets`.
-- External app sends `Authorization: Bearer <secret>` on each call. Verification is bcrypt-compare against the hash.
-- This app's broker route checks the current access token; if it's expiring within 5 minutes, refreshes proactively using the existing `refreshAccessToken()` (which is coalesced and persists to DB). Returns `{ access_token, expires_at, expires_in_seconds }` — never the refresh token.
-- Every successful access logs to `lm_activity` (action: "Token broker access") so unusual spikes (leaked secret) are visible.
-
-Rotation: admin clicks Rotate Secret on the admin page. The old secret becomes invalid immediately on the next call (single hash row per provider, replaced via `ON CONFLICT DO UPDATE`). External app must be re-keyed.
-
-Implementation lives in [app/api/integrations/semrush-access-token/route.js](app/api/integrations/semrush-access-token/route.js) (the broker endpoint), [app/api/admin/integration-broker-secret/route.js](app/api/admin/integration-broker-secret/route.js) (admin GET/POST/DELETE), and `set/verify/getMeta/clearIntegrationSecret` helpers in [lib/db.js](lib/db.js). [lib/semrush.js](lib/semrush.js) exports `getAccessToken()` so the broker can read the cached value without leaking `tokenCache` itself.
-
-### GBP integration (Phase 0 scaffolding present, deeper phases pending)
-
-A scaffold for direct Google Business Profile photo pushes lives in [lib/google-bp.js](lib/google-bp.js) — OAuth 2.0 authorization-code flow against the GBP API, token persistence via `lm_oauth_tokens` (provider `google_bp`), and stub helpers for listing accounts/locations (`listAccounts`, `listLocations`) and creating media (`createLocationMedia`). The `business.manage` scope is requested with `access_type=offline` and `prompt=consent` so we reliably get a refresh token. Activates only when `GOOGLE_BP_CLIENT_ID`/`SECRET` are set in env — without them, `isGoogleBpConfigured()` is false and the OAuth routes return 503.
-
-OAuth flow lives at `/api/auth/google-bp/start` (admin-only, redirects to Google) and `/api/auth/google-bp/callback` (verifies CSRF state cookie, exchanges code for tokens). `lm_shop_numbers` carries `gbp_account_id` + `gbp_location_id` for the Phase 2 shop↔GBP mapping (populated by a future sync job mirroring `bulkSetNewIds`). `lm_gbp_photo_pushes` audits Phase 3 bulk pushes — `recordGbpPhotoPush()` inserts as PENDING, `resolveGbpPhotoPush()` flips to SUCCESS|FAILED. None of these are wired to a UI yet — Phase 1 builds the connection flow and account listing, Phase 2 the mapping sync, Phase 3 the bulk-push page.
+`lib/semrush.js` now contains **only pure utilities** (`detectBrand`, `splitUrl`, `joinUrl`, `BRAND_PATTERNS`) — no network, no auth, no state. All Semrush API calls go through `lib/semrush-rich.js`.
 
 ## Architecture
 
-This is a Next.js App Router app that acts as a **thin multi-tenant proxy over the Semrush Listing Management API**. The whole company shares one Semrush Bearer Token (to avoid per-seat costs); the app's own JWT auth gates who can use it and which brands they can edit.
+Next.js App Router app that acts as a **thin multi-tenant proxy over the Semrush Listing Management API**. One company-wide `SEMRUSH_API_KEY` (to avoid per-seat costs); the app's own JWT auth gates who can use it and which brands they can edit.
 
 ### Request flow
 
 ```
-Browser → JWT cookie (auth-token) → middleware.js → API route → lib/semrush.js → Semrush API
+Browser → JWT cookie (auth-token) → middleware.js → API route → lib/semrush-rich.js → Semrush API
                                                   ↘ lib/db.js (activity log, users, shop numbers)
 ```
 
 - `middleware.js` only gates `/dashboard/*` and `/login`. **API routes verify the JWT themselves** (`verifyToken(cookies.get("auth-token"))`) — never assume middleware ran.
-- The Semrush Bearer Token lives in `tokenCache` (in-memory, module-scoped) inside `lib/semrush.js`. It is **never** sent to the browser. This in-memory cache does not survive serverless cold starts — for persistent OAuth tokens, replace with Vercel KV / DB (the file already comments this).
+- The Semrush Apikey lives in `process.env.SEMRUSH_API_KEY`, read on every call by `getRichApiKey()` inside `lib/semrush-rich.js`. It is **never** sent to the browser. Nothing is cached, nothing rotates — just a header on every fetch.
 - Every state-changing route calls `logActivity(...)` from `lib/db.js` so the activity log captures user attribution.
 
 ### Demo-mode fallback (load-bearing)
 
 Several routes ship demo data instead of failing:
-- `GET /api/semrush/locations` returns `LOCATIONS` from `lib/data.js` if either no Bearer Token is set, or the Semrush call throws.
-- `PUT /api/semrush/bulk-update` and `PUT /api/semrush/locations/[id]` return a fake "UPDATED" result in demo mode.
-- The header badge in `app/dashboard/layout.js` toggles between "API Live" / "Demo Mode" based on `getTokenStatus()`.
+- `GET /api/semrush/locations` returns `LOCATIONS` from `lib/data.js` if either no Apikey is set, or the Semrush call throws.
+- `PUT /api/semrush/bulk-update` and `PUT /api/semrush/locations/[id]` return a fake success in demo mode.
+- The header badge in `app/dashboard/layout.js` toggles between "API Live" / "Demo Mode" based on `getRichStatus()`.
 
 Keep this fallback when adding new Semrush-touching routes — the UI assumes it.
 
@@ -95,101 +67,95 @@ Encoded in the JWT payload, derived from `lib/auth.js` `DEMO_USERS` or the `lm_u
 - Routes filter locations with `user.brands.includes("*") || user.brands.includes(loc.brand)`.
 - Admin/manager-only routes check `user.role` directly; admin-only routes (user CRUD, `/api/db`, `DELETE /api/activity`) reject everything else.
 
-### Semrush rate limits — non-obvious
+### Semrush API — key facts
 
-`lib/semrush.js` is the single API client. Limits per endpoint (from the docstrings):
-- `GET /external/locations`: **10 req/sec** — `getAllLocations()` paginates with a 150 ms delay (~6.5 req/sec).
-- `PUT /external/locations/{id}`: 5 req/sec.
-- `PUT /external/locations` (bulk): **5 requests per MINUTE**, max 50 locations per request, IDs must be unique. This is the surprising one — bulk is per-minute, not per-second.
+Base URL: `https://api.semrush.com/apis/v4/local/v1`. Auth: `Authorization: Apikey <SEMRUSH_API_KEY>`. Field naming: snake_case (`business_name`, `phone_number`, `website_url`, `business_hours`, `special_hours`, `reopen_date`).
 
-`semrushFetch()` auto-retries 429s with 2s then 5s backoff, and auto-refreshes the token on a 401 if a refresh token is cached. Both error response shapes (`meta.success: false` and legacy `error: {...}`) are handled.
+- **List**: `GET /locations?offset={n}&limit={<=50}`. Server hard-caps at 50 items/page; `getAllRichLocations()` paginates with a 250ms throttle.
+- **Update**: `PATCH /locations/{id}?update_mask=field,field` — only fields in the mask are touched. **No bulk endpoint.** Every update is per-location.
+- **Business hours** use `_hours`-suffixed day keys (`monday_hours`, `tuesday_hours`, ...) — the `richBusinessHoursToApp` / `appBusinessHoursToRich` helpers in `lib/semrush-rich.js` translate between this and the app's `{ monday: [...], ... }` shape.
+- **Country field** is `country` (e.g. `"US"`), NOT `country_code`.
 
-### Bulk updates: client-driven batching
+Rate limits aren't publicly documented for the rich API; a 250ms per-request throttle has run cleanly for months across bulk-image push and now bulk edits. `richFetch()` auto-retries 429s with 2s then 5s backoff.
 
-Because Vercel's free-tier serverless functions time out before a long bulk run finishes, holiday updates are **batched on the client**, not the server:
-- `POST /api/holiday-import` parses the CSV and returns a preview + `updates[]` array (no Semrush calls).
-- The client (`app/dashboard/holiday-import/page.js`) slices into 50-location batches and calls `POST /api/holiday-push` once per batch, sleeping **15 seconds between batches** to stay under the 5/min bulk limit.
-- The Semrush bulk endpoint returns HTTP 200 even when individual locations fail — `bulkUpdateLocations()` returns `[{ locationId, state: "UPDATED" | "FAILED", error? }]`. Callers must inspect each item.
+### Canonical location ID
 
-The general bulk-edit modal (`components/BulkModal.js`) drives the same pattern through `PUT /api/semrush/bulk-update`. **The client must send `existingLocations`** — Semrush validates `locationName`, `city`, `state`, `zip`, `address`, `phone` on every bulk item (the zip in particular fails with a misleading "Zip code has invalid US format" if empty, not "missing"), so the route merges the change on top of these existing fields before forwarding. `existingLocations` from the client therefore carries `{id, name, city, state, zip, address, phone, website, urlParams, businessHours}` for each row. `businessHours` must also ride along whenever holiday hours are being set — Semrush rejects holiday-hours updates with "You must set business hours for holiday hours setup" when business hours aren't in the same payload. The route includes `businessHours` on every update (no-op for unrelated fields, satisfies the validator for holiday updates).
+The app's `location.id` is the rich-API `location_id`. Every route that receives an ID (path segment, request body, DB row) uses this value. Old-API IDs are no longer used at rest — pre-migration DB rows still carry `semrush_location_id` (old-API) alongside `semrush_new_id` (rich-API) on `lm_shop_numbers`, but the code path only reads `semrush_new_id`.
 
-Beyond 50 locations the modal itself does the chunking via `runBulkInBatches` — it slices into 50-shop chunks and calls `PUT /api/semrush/bulk-update` once per chunk, sleeping 15s between chunks to stay under Semrush's 5-requests-per-MINUTE bulk cap. A progress panel in the modal shows current batch / total batches, succeeded / failed counts, and per-item failure messages (with `details[]` field-level info appended). The parent's `handleBulkSave` detects `data.bulkChunked` and skips the API call (the modal already did the work), then deliberately leaves the modal mounted so the user can review failures before clicking Close. Per-location phone follows the same path and is no longer hard-capped at 50.
+Shop-number matching populates `semrush_new_id` via `/api/db/sync-rich-mappings` — matches shop records (in `lm_shop_numbers`) to rich API locations by website URL → phone → address+city (same heuristic order as the historical shop matcher). Idempotent; re-run any time.
+
+### Bulk updates: per-location PATCH loop
+
+The rich API has no bulk endpoint, so bulk paths loop per-location PATCH with a 250ms throttle:
+
+- **General bulk edit** (`components/BulkModal.js` → `PUT /api/semrush/bulk-update`): client chunks into ≤50-location batches (server enforces the cap), inter-batch sleep in the modal, sequential PATCH per location on the server (max ~52s per chunk under `maxDuration=90`).
+- **Holiday CSV import** (`app/dashboard/holiday-import/page.js` → `POST /api/holiday-push`): same shape — client chunks ≤50, server loops PATCHes.
+
+Because PATCH only touches the fields in `update_mask`, `existingLocations` from the client is no longer needed for the "must send every required field" reason it existed on the old API. It IS still passed for one narrow case: the `holiday_hours` bulk field defensively piggybacks the shop's current `business_hours` on the PATCH, mirroring the old-API quirk that rejected `special_hours`-only updates. If the rich API doesn't need this, the extra key is a no-op (identity write).
+
+Per-item results: `[{ locationId, state: "UPDATED" | "FAILED" | "SKIPPED", error? }]`.
+
+### Bulk listing-photo push
+
+[/dashboard/listings-photos](app/dashboard/listings-photos/page.js) pushes one image to every shop in a brand via Semrush's rich-API image endpoint. Same `Authorization: Apikey` auth. Reaches every directory Semrush distributes to (Google, Bing, Yelp, Apple Maps, Facebook, etc.).
+
+Confirmed shape (via Semrush support):
+- Endpoint: `POST /apis/v4/local/v1/locations/{location_id}/images`
+- Body: `{ content: <base64>, type: "PHOTO", description? }` — **base64-encoded inline JSON**, NOT URL reference, NOT multipart
+- Response: `{ id, url, type, createDate }` — `url` is a `storage.googleapis.com` storage URL
+
+The page accepts either a pasted URL or a drag-drop upload (Vercel Blob — requires `BLOB_READ_WRITE_TOKEN` env). The bulk-image route at [app/api/semrush/bulk-image/route.js](app/api/semrush/bulk-image/route.js) fetches the source URL **once**, base64-encodes **once**, then loops over the brand's shops (those with `semrush_new_id` populated) with a 250ms throttle between requests. Each push records to `lm_image_pushes` (PENDING → SUCCESS|FAILED) for the history panel and audit log. Client batches at 30 shops/call to stay under Vercel's 60s Pro function timeout (route also bumps `maxDuration = 90`).
+
+Shops without a `semrush_new_id` mapping are reported as "skipped" — run the rich-mappings sync on the Admin page to enable them.
+
+Three reliability features built atop the push because Semrush's image endpoint has rough edges:
+
+- **Server-side resize on upload** ([app/api/upload-image-blob/route.js](app/api/upload-image-blob/route.js)) — sharp resizes anything over 1200px on the long edge (JPEG q85, PNG preserved for transparency). 1.4 MB uploads were tripping Semrush's parser into a generic 400 "Invalid request" even when the image actually landed; resizing to under 500 KB usually makes Semrush respond cleanly. The page shows a preview thumbnail and "Resized from X → Y" metadata before push so the admin can verify.
+- **Verify-after-fail** in the bulk-image route — after each FAILED POST, the route does a GET on the shop's images and looks for one with a `createDate` within ~60 seconds of the push. If found, the row is flipped to SUCCESS with the Semrush image_id + URL captured. Catches the "Semrush stored it but returned a 400" pattern automatically.
+- **Audit endpoint** at [app/api/admin/audit-image-pushes](app/api/admin/audit-image-pushes/route.js) (admin-only "Audit Failed" button on the page) — retroactively runs the same verify check across recent FAILED rows.
+- **Skip-mode** in the push UI (default ON) — at run start, the client asks the server for shops with a SUCCESS row matching the exact source URL, filters them out. Re-uploading the same file gets a new Vercel Blob URL (timestamp in path), so a "redo with resized image" workflow correctly bypasses skip-mode.
+
+### GBP integration (Phase 0 scaffolding present, deeper phases pending)
+
+A scaffold for direct Google Business Profile photo pushes lives in [lib/google-bp.js](lib/google-bp.js) — OAuth 2.0 authorization-code flow against the GBP API, token persistence via `lm_oauth_tokens` (provider `google_bp`), and stub helpers for listing accounts/locations and creating media. The `business.manage` scope is requested with `access_type=offline` and `prompt=consent` so we reliably get a refresh token. Activates only when `GOOGLE_BP_CLIENT_ID`/`SECRET` are set in env — without them, `isGoogleBpConfigured()` is false and the OAuth routes return 503.
+
+OAuth flow at `/api/auth/google-bp/start` (admin-only) and `/api/auth/google-bp/callback`. `lm_shop_numbers` carries `gbp_account_id` + `gbp_location_id` for the Phase 2 shop↔GBP mapping. `lm_gbp_photo_pushes` audits Phase 3 bulk pushes. None wired to UI yet.
 
 ### Data shape: app ↔ Semrush
 
-`lib/semrush.js` is the only place where these translate:
-- `transformLocation()` — Semrush → app (renames `locationName` → `name`, `region` → `state`; splits `websiteUrl` into `website` + `urlParams`; derives `status: "temp_closed"` from `reopenDate`).
-- `toSemrushFormat()` / `toBulkSemrushFormat()` — app → Semrush. Handles **two business-hours shapes**: app format `{ monday: { open, close, closed } }` vs Semrush format `{ monday: [{ from, to }] }`. It auto-detects which one it got.
-- `splitUrl()` / `joinUrl()` — website URL and query params are stored separately so URL-params bulk edits can preserve each location's base URL.
-- Holiday hours are passed through as-is; they must already be in Semrush shape (`{ type: "REGULAR" | "CLOSED" | "OPENED_ALL_DAY" | "RANGE", day, times? }`). `RANGE` requires `times`; the others must omit it.
+All translation lives in [lib/semrush-rich.js](lib/semrush-rich.js):
+- `appLocationFromRich(rich)` — rich API → app shape. Sets `id = location_id`, flattens `business_hours` to app's `{ monday: [...], ... }` shape, splits `website_url` into `website` + `urlParams`, derives `status: "temp_closed"` from `reopen_date`, folds in all rich fields (description, categories, coordinates, etc.) so the list payload drives both the row grid AND the Extras tab.
+- `appChangesToRichPatch(changes)` — app-shape change set → `{ fields, updateMask }` ready for `updateRichLocation()`. Only keys present in `changes` become part of the mask. Website + urlParams collapse to `website_url` if either is supplied.
+- `splitUrl()` / `joinUrl()` — website URL and query params are stored separately so URL-params bulk edits can preserve each location's base URL. Duplicated in `lib/semrush.js` for callers that still import from there.
+- Holiday hours pass through as-is; must be in Semrush shape (`{ type: "CLOSED" | "OPENED_ALL_DAY" | "RANGE", day, times? }`). `RANGE` requires `times`; the others omit it.
+
+### EditModal save flow
+
+Post-migration this is one call. The parent's `handleSave` in [app/dashboard/page.js](app/dashboard/page.js) sends `PUT /api/semrush/locations/[id]` with the diffed change set (`{ changes: {...} }`) — the route builds one PATCH from all the app-shape keys in the change object and touches only those on Semrush's side. No more dual-save orchestration; no more "rich save then core save" ordering.
+
+The legacy `PATCH /api/semrush/rich/[id]` route (used pre-migration for the Extras tab) still exists for any code still hitting it, but new code should go through the unified single-edit route.
 
 ### Brand detection
 
-`detectBrand()` in `lib/semrush.js` runs ordered substring matches against name+URL. **Order matters**: Canadian variants (`carstar-ca`, `take5-ca`, `maaco-ca`) must come before their US counterparts because the US patterns are substrings of the Canadian ones. When adding a new brand, add it to `BRAND_PATTERNS` here AND to `BRANDS` in `lib/data.js` (which carries display name + color). `getBrandConfig()` will fabricate a deterministic color for unknown brands rather than crash.
-
-### Two Semrush APIs (hybrid client)
-
-The codebase talks to **two distinct Semrush APIs** with different shapes, different auth, and different ID spaces. Phase 0 of the migration spike confirmed:
-
-| | Deprecated API ([lib/semrush.js](lib/semrush.js)) | Rich API ([lib/semrush-rich.js](lib/semrush-rich.js)) |
-|---|---|---|
-| Base URL | `/apis/v4-raw/listing-management/v1` | `/apis/v4/local/v1` |
-| Auth | `Authorization: Bearer <token>` (OAuth Device Auth, env `SEMRUSH_BEARER_TOKEN`) | `Authorization: Apikey <key>` (Subscription Info page, env `SEMRUSH_API_KEY`) |
-| Field naming | camelCase (`locationName`, `holidayHours`) | snake_case (`business_name`, `special_hours`) |
-| Update verb | `PUT` (full payload, required: name/city/address/phone) | `PATCH` with `update_mask=field,field` (partial) |
-| Bulk update | Yes — 50 locations / req, 5 req/MINUTE | **None.** Only single-location PATCH exists. |
-| ID field | `id` | `location_id` — **different value** from old-API `id` for the same shop |
-| Extra fields | none | `description`, `category_ids`, `coordinates`, `featured_message`, `suppress_address`, `service_area_places`, social handles |
-
-Important consequences:
-- The deprecated API is the **workhorse** — reads, single edits, bulk edits all stay there. Don't touch the hot path.
-- The rich API is a **supplement** for fields the deprecated API doesn't expose. New code that touches description/categories/coordinates/social goes through `lib/semrush-rich.js`.
-- **Old-API `id` ≠ rich-API `location_id`.** [lib/db.js](lib/db.js) `lm_shop_numbers` carries a `semrush_new_id` column mapping the two. Populated by `POST /api/db/sync-rich-mappings` (admin button on [/dashboard/admin](app/dashboard/admin/page.js)) which matches by website URL → phone → address+city — same logic as the existing shop-number matcher. Re-run any time; idempotent.
-- Use `getNewIdForOldId(oldId)` from [lib/db.js](lib/db.js) when routes need to bridge between APIs. The "Extras" tab in [components/EditModal.js](components/EditModal.js) consumes `GET /api/semrush/rich/[oldId]` — the route resolves the mapping internally and returns `{ rich: {...} }` on hit, or `{ rich: null, reason: "no_mapping" | "no_apikey" }` for warnable states (NOT errors, so the UI can show a friendly banner instead of a 500).
-- `PATCH /api/semrush/rich/[oldId]` accepts `{ changes: { ...camelCase keys... }, locationName?, validateOnly? }` — `toRichUpdate()` in [lib/semrush-rich.js](lib/semrush-rich.js) builds both the snake_case payload and the `update_mask` from the same input keys, so only dirty fields touch upstream. The route logs to activity with `Fields: description, category_ids, ...` so partial saves are traceable.
-
-### Dual-save flow in EditModal
-
-[components/EditModal.js](components/EditModal.js) saves to **two APIs from one click** because core fields live on the deprecated API and rich fields on the new one:
-
-1. Build the rich diff (`richDirtyChanges()` — JSON-equality per key against the initial fetch).
-2. If anything changed AND the rich payload is loaded, fire `PATCH /api/semrush/rich/[id]` first. **If it fails, halt** — show the error inline and keep the modal open. Don't proceed to the core save, because the user needs to see what went wrong and decide.
-3. On rich success (or no rich changes), call `onSave(...)` — parent's [app/dashboard/page.js](app/dashboard/page.js#L106) closes the modal and fires `PUT /api/semrush/locations/[id]` for the core fields.
-
-Why this ordering: parent's `onSave` closes the modal immediately, so if rich save were second the user wouldn't see rich errors. Rich-first means a failed rich save keeps the modal open with the error visible, while a failed core save still surfaces via the parent's toast.
+`detectBrand()` in `lib/semrush.js` runs ordered substring matches against name+URL. Accepts either app-shape (`{ name, website }`) or rich-API shape (`{ business_name, website_url }`). **Order matters**: Canadian variants (`carstar-ca`, `take5-ca`, `maaco-ca`) must come before their US counterparts because the US patterns are substrings of the Canadian ones. When adding a new brand, add it to `BRAND_PATTERNS` here AND to `BRANDS` in `lib/data.js` (which carries display name + color). `getBrandConfig()` will fabricate a deterministic color for unknown brands rather than crash.
 
 ### Categories picker
 
-The picker in EditModal hits `GET /api/semrush/categories` once on mount. That route proxies `getCategories()` in [lib/semrush-rich.js](lib/semrush-rich.js), which caches the catalog in-process for 24h. If the upstream endpoint 404s or errors, the route returns `{ categories: [], reason }` — the picker degrades to a free-text input that accepts raw category IDs. Either way the user can edit categories; only the labels differ.
-- The rich client uses an in-process 24h cache for `getCategories()` — fine for serverless workers, will repopulate per cold start.
+The picker in EditModal hits `GET /api/semrush/categories` once on mount. That route proxies `getCategories()` in [lib/semrush-rich.js](lib/semrush-rich.js), which caches the catalog in-process for 24h per-country. If the upstream endpoint 404s or errors, the route returns `{ categories: [], reason }` — the picker degrades to a free-text input that accepts raw category IDs.
 
-Status helpers: `getTokenStatus()` (old API) and `getRichStatus()` (rich API) both return `{ hasToken / hasKey, ... }`. **Neither validates the credential actually works** — see "Misleading badge" below.
+### API-health badge
 
-### Honest API-health badge (Phase 4)
+`lib/semrush-rich.js` tracks `lastSuccessAt` / `lastErrorAt` / `lastErrorMessage` in module scope. `richFetch()` is wrapped in try/catch that calls `recordRichSuccess` / `recordRichError` so every call updates telemetry. `getRichStatus()` exposes this as a `state` field: `"healthy"` (success more recent than any error), `"failing"` (error more recent than success), `"untested"` (key configured but no calls yet from this worker), `"no_key"` (not configured).
 
-Both API client modules track `lastSuccessAt` / `lastErrorAt` / `lastErrorMessage` in module-scope state. `semrushFetch` and `richFetch` are wrapped in try/catch that calls `recordSuccess` / `recordError` so every call updates the telemetry. `getTokenStatus()` and `getRichStatus()` expose this as a `state` field: `"healthy"` (success more recent than any error), `"failing"` (error more recent than success), `"untested"` (token configured but no calls yet from this worker), `"no_token"`/`"no_key"` (not configured).
+[app/api/semrush/token/route.js](app/api/semrush/token/route.js) actively pings `GET /locations?limit=1` before returning telemetry so a cold worker's badge reflects current truth rather than the per-worker cache. Adds ~150ms to badge polls. `?skipPing=1` short-circuits for diagnostic use. Response shape still has `oldApi` for backwards compatibility with any lingering callers, but it always reports `no_token` post-migration — `richApi` is the field that matters.
 
-[app/api/semrush/token/route.js](app/api/semrush/token/route.js) returns both APIs' state. [app/dashboard/layout.js](app/dashboard/layout.js) `ApiHealthBadge` consumes this:
+### Bulk rich-field updates
 
-| Old state | Rich state | Badge |
-|---|---|---|
-| `failing` | any | "API Error" (red) — last call failed; hover for message |
-| `healthy` | `failing` | "Rich API issue" (amber) — old fine, rich broken |
-| `healthy` | healthy / untested / no_key | "API Live" (green) |
-| `no_token` | any | "Demo Mode" (yellow) |
-| `untested` | any | "API ready" (blue) — cold worker, no calls flowed yet |
+[components/BulkModal.js](components/BulkModal.js) supports rich fields (`description`, `featured_message`, `suppress_address`, `youtube_video`, `instagram_username`, `twitter_username`, `category_append`) alongside the core fields (hours, phone, website, holiday hours, temp closure). All flow through `PUT /api/semrush/bulk-update` post-migration — no more separate route for rich vs. core.
 
-Telemetry is per-serverless-instance, so without intervention a cold worker would stay at `untested` until it served a Semrush-touching route, and a worker that hit an old error would keep reporting `failing` long after the underlying issue was fixed. To prevent that drift, `GET /api/semrush/token` now actively pings both APIs (`GET /external/locations?size=1` and `GET /locations?limit=1`, in parallel) before returning telemetry. Adds ~150ms to badge polls but guarantees the badge reflects current truth instead of stale per-worker cache. Pass `?skipPing=1` to short-circuit when you want to see what telemetry looks like *without* triggering a refresh attempt (diagnostic use).
-
-### Bulk rich-field updates (Phase 4)
-
-[components/BulkModal.js](components/BulkModal.js) supports these rich fields as bulk-edit options: `description`, `featured_message`, `suppress_address`, `youtube_video`, `instagram_username`, `twitter_username`, and `category_append`. Because the new API has no bulk endpoint, the modal **fires sequential PATCH `/api/semrush/rich/[id]` calls** with a 250ms throttle between them. Progress is rendered in-modal with a live counter (`X / N`, succeeded / failed / skipped) and the first 20 failure messages.
-
-`skipped` count means the location has no `semrush_new_id` mapping in `lm_shop_numbers`; the route returns 404 with `reason: "no_mapping"` and the loop continues. Distinct from `failed`, which represents an actual API error.
+`skipped` count means the location has no `semrush_new_id` mapping in `lm_shop_numbers`; the row can't be updated until sync-rich-mappings is re-run. Distinct from `failed`, which represents an actual API error.
 
 **Append-categories** is a special case marked by `appendCategories: true` on the FIELDS entry. It costs **two API calls per location** (GET to read current categoryIds, then PATCH to write merged list). Merge logic: union of current + requested, deduped, capped at the API's 10-category limit, current-first ordering preserved (so the existing primary stays primary). If a location already has every requested category, no PATCH fires — counted as success with a separate `noopCount` shown in the progress UI as "Already had all". The category picker pre-loads the catalog for the brand's apparent country (`brandLocations[0]?.countryCode || "US"`) and falls back to free-text input when the catalog is empty or unavailable.
-
-The parent's `handleBulkSave` in [app/dashboard/page.js](app/dashboard/page.js) detects rich-bulk by checking for a `richBulk` field on the save payload — when present, it skips the old-API bulk endpoint call entirely (the modal has already done the work) and just toasts/logs based on the supplied counts.
 
 ### Password management
 
@@ -201,13 +167,9 @@ The schema migration (`ALTER TABLE lm_users ADD COLUMN IF NOT EXISTS password_te
 
 [app/dashboard/health/page.js](app/dashboard/health/page.js) is a triage view for locations Semrush reports as having sync errors. No new API calls — it reads `semrushErrors` straight from the same `/api/semrush/locations` response the main page already uses, filters to rows where `semrushErrors.length > 0`, and lets you sort by error count, brand, state, or name. Clicking a row opens [components/EditModal.js](components/EditModal.js) with `initialTab="errors"` so the user lands directly on the errors view.
 
-[app/dashboard/page.js](app/dashboard/page.js) carries a status-distribution row (StatusCard) above the per-brand summary: Healthy / With Errors / Processing / Temp Closed counts with percent of total. The "With Errors" tile is a link to `/dashboard/health` when its value is > 0 — the natural drilldown.
+[app/dashboard/page.js](app/dashboard/page.js) carries a status-distribution row (StatusCard) above the per-brand summary: Healthy / With Errors / Processing / Temp Closed counts with percent of total. The "With Errors" tile is a link to `/dashboard/health` when its value is > 0.
 
-`semrushErrors` shape (per location, from the deprecated API's GetLocations response): `[{ code: string, message: string, details?: [...] }]`. Errors are emitted by Semrush after a push to a downstream directory fails — they typically resolve when the offending field is corrected and the listing is re-pushed.
-
-### Misleading API-Live badge (FIXED in Phase 4)
-
-Pre-Phase 4 the badge only checked whether `SEMRUSH_BEARER_TOKEN` was set, not whether it worked — an expired token failed silently behind a green dot. Now resolved via the health telemetry described above. If you're debugging "why am I seeing demo data," hovering the badge will show the most recent error.
+`semrushErrors` shape (per location, from the rich API's `errors` array): `[{ code: string, message: string, details?: [...] }]`. Errors are emitted by Semrush after a push to a downstream directory fails — they typically resolve when the offending field is corrected and the listing is re-pushed.
 
 ### Shop numbers
 
@@ -216,4 +178,4 @@ Driven Brands' internal "Shop ID" doesn't exist in Semrush — the `lm_shop_numb
 2. Normalized phone (last 10 digits).
 3. Normalized street address + city.
 
-`GET /api/semrush/locations` merges `shopId` onto each location using `mergeShopNumbers()` with the same fallback chain, so the UI sees it as just another field.
+`GET /api/semrush/locations` merges `shopId` onto each location using `mergeShopNumbers()` — primary lookup is by `semrush_new_id` (rich-API location_id), with URL/phone fallbacks for shops that haven't been sync'd yet.

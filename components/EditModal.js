@@ -227,13 +227,18 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
     }
 
     // 2. Core save — onSave triggers PUT /api/semrush/locations/[id] in
-    //    the parent and closes the modal. The second arg lets the parent's
-    //    toast acknowledge rich fields that already saved successfully.
+    //    the parent and closes the modal. Post-migration this route now
+    //    PATCHes rich fields too, so we spread `rich` on top of formData
+    //    to carry the latest rich values through — otherwise formData's
+    //    stale rich fields (seeded from location on mount) would revert
+    //    the rich changes we just PATCHed in step 1. The second arg lets
+    //    the parent's toast acknowledge which rich fields ran first.
     setSaved(true);
     setTimeout(() => {
       onSave(
         {
           ...formData,
+          ...(rich || {}),
           businessHours: hours,
           holidayHours: holidayHours.length > 0 ? holidayHours : undefined,
         },

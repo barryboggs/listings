@@ -1,15 +1,25 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
 import {
-  bulkUpdateLocations,
-  getTokenStatus,
-  toSemrushFormat,
-} from "@/lib/semrush";
+  updateRichLocation,
+  getRichStatus,
+  appChangesToRichPatch,
+} from "@/lib/semrush-rich";
 import { recordPendingPushes } from "@/lib/db";
 
-// Semrush requires E.164 ("+<digits>"). Mirrors the client-side normalizer
-// in components/BulkModal.js — kept here too so any caller (CSV import,
-// future routes, hand-rolled curl) gets the same lenient input handling.
+// Vercel Pro function timeout. 50 shops × ~500ms/shop network + 250ms throttle
+// = ~37.5s worst case; 90s headroom is plenty and matches the bulk-image route.
+export const maxDuration = 90;
+
+// Delay between per-location PATCHes. Rich API doesn't publish a specific
+// rate limit; 250ms mirrors what the bulk-image push has been running with
+// for months without 429s.
+const PATCH_THROTTLE_MS = 250;
+
+// Semrush wants E.164 ("+<digits>"). Mirrors the client-side normalizer
+// in components/BulkModal.js — keeping this here too so any caller
+// (CSV import, future routes, hand-rolled curl) gets the same lenient
+// input handling.
 function normalizePhone(input) {
   if (!input) return "";
   const trimmed = String(input).trim();
@@ -19,18 +29,35 @@ function normalizePhone(input) {
   return digits ? `+${digits}` : "";
 }
 
+/**
+ * PUT /api/semrush/bulk-update
+ *
+ * Post-migration this loops per-location PATCHes against the rich API
+ * (which has no bulk endpoint). Server-side throttled at 250ms/shop; the
+ * client (BulkModal) still batches into ≤50-shop chunks so any single
+ * call fits inside the Vercel function timeout.
+ *
+ * Request body:
+ *   locationIds: string[]                       // rich-API location_ids
+ *   field: "hours" | "phone" | "phone_per_location" | "website" |
+ *          "url_params" | "temp_closure" | "holiday_hours" |
+ *          "description" | ...rich fields...
+ *   value: any                                  // shared value (most fields)
+ *   perLocationValues?: { [locationId]: value } // for phone_per_location
+ *   existingLocations?: [{ id, businessHours, ... }]  // used only for the
+ *       holiday-hours-needs-business-hours safety belt (see below)
+ *
+ * Response:
+ *   { success, source, updated, failed, skipped, results, errors,
+ *     updatedBy, updatedAt }
+ *   results = [{ locationId, state: "UPDATED"|"FAILED"|"SKIPPED", error? }]
+ */
 export async function PUT(request) {
-  // Verify auth
   const token = request.cookies.get("auth-token")?.value;
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const user = await verifyToken(token);
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Only admin/manager can bulk update
   if (!["admin", "manager"].includes(user.role)) {
     return NextResponse.json(
       { error: "Only admins and managers can perform bulk updates" },
@@ -39,27 +66,15 @@ export async function PUT(request) {
   }
 
   const body = await request.json();
-  // Expected shape from frontend:
-  // {
-  //   locationIds: ["id1", "id2", ...],
-  //   field: "hours" | "phone" | "phone_per_location" | "website" | "temp_closure" | "holiday_hours",
-  //   value: { ... }                                  // shared value (most fields)
-  //   perLocationValues: { id: newPhone }             // phone_per_location only
-  //   existingLocations: [{ id, name, city, address, phone, ... }]  // current data for required fields
-  // }
-
   const { locationIds, field, value, perLocationValues, existingLocations } = body;
 
   if (!locationIds || !Array.isArray(locationIds) || locationIds.length === 0) {
-    return NextResponse.json(
-      { error: "locationIds array is required" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "locationIds array is required" }, { status: 400 });
   }
 
   if (locationIds.length > 50) {
     return NextResponse.json(
-      { error: "Maximum 50 locations per bulk update (Semrush API limit)" },
+      { error: "Maximum 50 locations per bulk update call (client-side chunking)" },
       { status: 400 }
     );
   }
@@ -80,14 +95,14 @@ export async function PUT(request) {
     }
   }
 
-  const { hasToken } = getTokenStatus();
-
-  if (!hasToken) {
+  const { hasKey } = getRichStatus();
+  if (!hasKey) {
     return NextResponse.json({
       success: true,
       source: "demo",
       updated: locationIds.length,
       failed: 0,
+      skipped: 0,
       results: locationIds.map((id) => ({ locationId: id, state: "UPDATED" })),
       message: "Demo mode — no actual API calls made.",
       updatedBy: user.name,
@@ -95,156 +110,144 @@ export async function PUT(request) {
     });
   }
 
-  // Build the bulk payload: { locations: [{ id, locationName, city, address, phone, ...changes }] }
-  // Required fields (locationName, city, address, phone) must be present on every item.
-  // We merge the change into existing location data to satisfy required fields.
-  try {
-    const existingMap = new Map(
-      (existingLocations || []).map((loc) => [loc.id, loc])
-    );
+  // Existing-hours lookup for the holiday-hours-needs-business-hours safety
+  // belt. The old API required businessHours in the payload for a holiday
+  // update; we replay it defensively for rich too. If rich turns out to
+  // NOT need this, the extra field in the mask is harmless (writes the
+  // same value back). Only wired for `holiday_hours` field.
+  const existingMap = new Map(
+    (existingLocations || []).map((loc) => [loc.id, loc])
+  );
 
-    const locations = locationIds.map((id) => {
-      const existing = existingMap.get(id) || {};
+  const results = [];
+  const successfulRows = [];
 
-      // Build the update — start with existing required fields, then overlay the change.
-      //
-      // We include zip + state even though CLAUDE.md previously said only
-      // name/city/address/phone were required. Empirically Semrush also
-      // validates `zip` as part of the bulk update — sending nothing fails
-      // a US location with "Zip code has invalid US format" because their
-      // regex check treats empty as non-matching. Sending the existing
-      // value satisfies the validator without changing anything.
-      //
-      // businessHours rides along because Semrush rejects holiday-hours
-      // updates with "You must set business hours for holiday hours setup"
-      // when the payload doesn't include them. Same defensive replay as
-      // zip — sending the location's current businessHours back unchanged
-      // is a no-op for hours but satisfies the validator for any field.
-      // If the location has no hours set, we skip the field (so a
-      // hours-less location bulk-updating holiday hours will still fail —
-      // correct behavior, the user must set business hours first).
-      let updateData = {
-        name: existing.name || existing.locationName || "",
-        city: existing.city || "",
-        state: existing.state || "",
-        zip: existing.zip || "",
-        address: existing.address || "",
-        phone: existing.phone || "",
-      };
-      if (existing.businessHours) {
-        updateData.businessHours = existing.businessHours;
-      }
+  for (let i = 0; i < locationIds.length; i++) {
+    const id = locationIds[i];
+    const existing = existingMap.get(id) || {};
 
-      // Apply the specific field change
-      switch (field) {
-        case "hours":
-          updateData.businessHours = value;
-          break;
-        case "phone":
-          updateData.phone = normalizePhone(typeof value === "string" ? value : value?.phone || "");
-          break;
-        case "phone_per_location":
-          // Each location gets its own new phone from the perLocationValues map.
-          updateData.phone = normalizePhone(perLocationValues[id]);
-          break;
-        case "website":
-          updateData.website = typeof value === "string" ? value : value?.website || "";
-          // Preserve existing URL params when only changing the base URL
-          updateData.urlParams = existing.urlParams || "";
-          break;
-        case "url_params":
-          // Keep each location's existing base URL, replace just the parameters
-          updateData.website = existing.website || "";
-          updateData.urlParams = typeof value === "string" ? value : "";
-          break;
-        case "temp_closure":
-          updateData.reopenDate = value?.reopenDate || null;
-          break;
-        case "holiday_hours":
-          updateData.holidayHours = value;
-          break;
-        default:
-          Object.assign(updateData, value || {});
-      }
+    // Build the change set for this shop — one entry per app-shape key.
+    // Only fields we intend to change go in; the rich PATCH mask is
+    // derived from exactly this set.
+    const changes = buildChangesForField({ field, value, perLocationValues, existing, id });
 
-      const semrushPayload = toSemrushFormat(updateData);
-      semrushPayload.id = id;
-      return semrushPayload;
-    });
+    // If nothing to change (e.g. per-location map missing an entry we
+    // failed to catch), skip cleanly.
+    if (Object.keys(changes).length === 0) {
+      results.push({ locationId: id, state: "SKIPPED", error: { message: "No value to apply" } });
+      continue;
+    }
 
-    // Single API call — UpdateLocations endpoint
-    // Rate limit: 5 req/minute, max 50 locations
-    const results = await bulkUpdateLocations(locations);
+    const { fields, updateMask } = appChangesToRichPatch(changes);
+    if (updateMask.length === 0) {
+      results.push({ locationId: id, state: "SKIPPED", error: { message: "No mask emitted for changes" } });
+      continue;
+    }
 
-    // results = [{ locationId, state: "UPDATED"|"FAILED", error? }]
-    const updated = results.filter((r) => r.state === "UPDATED").length;
-    const failed = results.filter((r) => r.state === "FAILED").length;
-
-    // Record the successful shops in the pending-approval queue. existingMap
-    // gives us each shop's name/brand for the listing. We skip the FAILED
-    // shops — Semrush didn't accept them, so there's nothing for the user to
-    // approve in their UI. Fire-and-forget.
-    const pendingRows = results
-      .filter((r) => r.state === "UPDATED")
-      .map((r) => {
-        const existing = existingMap.get(r.locationId) || {};
-        return {
-          semrushLocationId: r.locationId,
-          locationName: existing.name || "",
-          shopId: existing.shopId || "",
-          brand: body.brand || "",
-          fields: field,
-          pushedBy: user.name,
-        };
+    try {
+      await updateRichLocation(id, fields, updateMask);
+      results.push({ locationId: id, state: "UPDATED" });
+      successfulRows.push({
+        semrushLocationId: id,
+        locationName: existing.name || "",
+        shopId: existing.shopId || "",
+        brand: body.brand || existing.brand || "",
+        fields: field,
+        pushedBy: user.name,
       });
-    if (pendingRows.length > 0) {
-      recordPendingPushes(pendingRows).catch((e) =>
-        console.error("recordPendingPushes (bulk):", e.message)
-      );
-    }
-    const errors = results
-      .filter((r) => r.state === "FAILED")
-      .map((r) => ({
-        locationId: r.locationId,
-        error: r.error?.message || "Unknown error",
-        code: r.error?.code,
-        details: r.error?.details || [],
-      }));
-
-    // If anything failed, log the exact request payload + Semrush response so
-    // a developer can see which field Semrush rejected (the per-item "error"
-    // message is often the generic "invalid data provided"; `details[]` may
-    // pin it to a specific field, or the payload diff may reveal the cause).
-    if (failed > 0) {
-      console.error("[bulk-update] Semrush rejected items:", JSON.stringify({
-        field,
-        failed,
-        updated,
-        firstFailedItem: locations.find((p) => errors.some((e) => e.locationId === p.id)),
-        errors,
-      }, null, 2));
+    } catch (err) {
+      results.push({
+        locationId: id,
+        state: "FAILED",
+        error: { message: err.message || "Unknown error" },
+      });
     }
 
-    return NextResponse.json({
-      success: failed === 0,
-      source: "semrush",
-      updated,
-      failed,
-      results,
-      errors: errors.length > 0 ? errors : undefined,
-      updatedBy: user.name,
-      updatedAt: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error("Semrush bulk update error:", error.message);
-    console.error("[bulk-update] Exception during call. Field:", field, "locationIds:", locationIds.length);
-    return NextResponse.json(
-      {
-        success: false,
-        error: error.message,
-        source: "semrush",
-      },
-      { status: 502 }
+    // Throttle between calls — skip the wait after the last one.
+    if (i < locationIds.length - 1) {
+      await new Promise((r) => setTimeout(r, PATCH_THROTTLE_MS));
+    }
+  }
+
+  const updated = results.filter((r) => r.state === "UPDATED").length;
+  const failed = results.filter((r) => r.state === "FAILED").length;
+  const skipped = results.filter((r) => r.state === "SKIPPED").length;
+
+  if (successfulRows.length > 0) {
+    recordPendingPushes(successfulRows).catch((e) =>
+      console.error("recordPendingPushes (bulk):", e.message)
     );
+  }
+
+  const errors = results
+    .filter((r) => r.state === "FAILED")
+    .map((r) => ({
+      locationId: r.locationId,
+      error: r.error?.message || "Unknown error",
+    }));
+
+  if (failed > 0) {
+    console.error("[bulk-update] Rich API rejected items:", JSON.stringify({
+      field,
+      failed,
+      updated,
+      skipped,
+      firstFailure: errors[0],
+    }, null, 2));
+  }
+
+  return NextResponse.json({
+    success: failed === 0,
+    source: "semrush",
+    updated,
+    failed,
+    skipped,
+    results,
+    errors: errors.length > 0 ? errors : undefined,
+    updatedBy: user.name,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Translate the BulkModal's field/value/perLocationValues protocol into a
+ * per-shop app-shape change set. Adding a new bulk field means adding a
+ * case here + (if it's a rich-only field) making sure appChangesToRichPatch
+ * knows the key.
+ *
+ * The holiday-hours case defensively piggybacks businessHours if the shop
+ * has existing hours — mirrors the old-API workaround for its
+ * "you must set business hours for holiday hours setup" quirk. If rich
+ * turns out to not need this, the extra key is a no-op (identity write).
+ */
+function buildChangesForField({ field, value, perLocationValues, existing, id }) {
+  switch (field) {
+    case "hours":
+      return { businessHours: value };
+    case "phone":
+      return { phone: normalizePhone(typeof value === "string" ? value : value?.phone || "") };
+    case "phone_per_location":
+      return { phone: normalizePhone(perLocationValues?.[id]) };
+    case "website":
+      return {
+        website: typeof value === "string" ? value : value?.website || "",
+        urlParams: existing.urlParams || "",
+      };
+    case "url_params":
+      return {
+        website: existing.website || "",
+        urlParams: typeof value === "string" ? value : "",
+      };
+    case "temp_closure":
+      return { reopenDate: value?.reopenDate || null };
+    case "holiday_hours": {
+      const out = { holidayHours: value };
+      if (existing.businessHours) out.businessHours = existing.businessHours;
+      return out;
+    }
+    default:
+      // Pass-through for anything else (rich fields, ad-hoc). value must be
+      // an object whose keys are already in app-shape.
+      return (value && typeof value === "object") ? { ...value } : {};
   }
 }

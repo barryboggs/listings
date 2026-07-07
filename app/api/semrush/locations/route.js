@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
+import { detectBrand } from "@/lib/semrush";
 import {
-  getAllLocations,
-  getTokenStatus,
-  transformLocation,
-  detectBrand,
-} from "@/lib/semrush";
+  getAllRichLocations,
+  getRichStatus,
+  appLocationFromRich,
+} from "@/lib/semrush-rich";
 import { LOCATIONS as DEMO_LOCATIONS, getBrandConfig } from "@/lib/data";
 import { getShopNumberMap } from "@/lib/db";
 
@@ -20,14 +20,14 @@ export async function GET(request) {
   }
 
   // Load shop number mappings
-  let shopMap = { bySemrushId: new Map(), byShopId: new Map(), all: [] };
+  let shopMap = { bySemrushId: new Map(), byShopId: new Map(), byNewSemrushId: new Map(), all: [] };
   try {
     shopMap = await getShopNumberMap();
   } catch {}
 
-  const { hasToken } = getTokenStatus();
+  const { hasKey } = getRichStatus();
 
-  if (!hasToken) {
+  if (!hasKey) {
     const filtered = DEMO_LOCATIONS.filter((loc) =>
       user.brands.includes("*") || user.brands.includes(loc.brand)
     );
@@ -37,17 +37,18 @@ export async function GET(request) {
       locations: filtered,
       brands,
       source: "demo",
-      message: "Using demo data — set SEMRUSH_BEARER_TOKEN in .env.local to connect live API",
+      message: "Using demo data — set SEMRUSH_API_KEY in .env.local to connect the Semrush API",
     });
   }
 
   try {
-    const raw = await getAllLocations();
+    const raw = await getAllRichLocations({ limit: 50 });
 
-    const locations = raw.map((loc) => {
-      const transformed = transformLocation(loc);
-      transformed.brand = detectBrand(loc);
-      return transformed;
+    const locations = raw.map((rich) => {
+      const app = appLocationFromRich(rich);
+      // detectBrand accepts either shape ({ name/website } or {locationName/websiteUrl})
+      app.brand = detectBrand(app);
+      return app;
     });
 
     mergeShopNumbers(locations, shopMap);
@@ -85,23 +86,36 @@ export async function GET(request) {
 
 /**
  * Merge shop numbers into location data.
- * Primary: match by semrush_location_id in the database.
- * Fallback: check if the shop ID appears in the location's website URL.
- * Fallback 2: match by normalized phone number.
+ *
+ * Post-migration: location.id is the rich-API location_id, so the primary
+ * lookup key is byNewSemrushId. bySemrushId (old-API ID) is retained as a
+ * secondary lookup for legacy demo data / any shops not yet re-synced.
+ *
+ * Fallbacks by URL and phone remain because some shops in lm_shop_numbers
+ * won't have a semrush_new_id populated yet (sync-rich-mappings hasn't
+ * been re-run since they were imported).
  */
 function mergeShopNumbers(locations, shopMap) {
-  // Build a reverse lookup: all shop records indexed by shop_id
   const allShops = shopMap.all || [];
 
   for (const loc of locations) {
-    // Primary: already matched in database
-    const shop = shopMap.bySemrushId.get(loc.id);
-    if (shop) {
-      loc.shopId = shop.shop_id;
+    // Primary: matched by new-API ID
+    const byNewId = shopMap.byNewSemrushId?.get(loc.id);
+    if (byNewId) {
+      loc.shopId = byNewId.shop_id;
       continue;
     }
 
-    // Fallback: check if any shop ID appears in this location's URL
+    // Secondary: match by legacy old-API ID (demo data, or if a shop row
+    // happens to carry the old ID we're now using as loc.id — shouldn't
+    // normally happen post-migration but harmless if it does).
+    const byOldId = shopMap.bySemrushId?.get(loc.id);
+    if (byOldId) {
+      loc.shopId = byOldId.shop_id;
+      continue;
+    }
+
+    // Fallback: URL substring match
     const url = (loc.websiteRaw || loc.website || "").toLowerCase();
     if (url) {
       let found = false;
@@ -115,7 +129,7 @@ function mergeShopNumbers(locations, shopMap) {
       if (found) continue;
     }
 
-    // Fallback 2: phone number match
+    // Fallback: phone match
     const locPhone = (loc.phone || "").replace(/[^0-9]/g, "").slice(-10);
     if (locPhone.length >= 10) {
       for (const s of allShops) {
@@ -158,7 +172,6 @@ function deriveBrands(locations) {
     });
   }
 
-  // Sort by location count descending
   brands.sort((a, b) => b.locationCount - a.locationCount);
   return brands;
 }

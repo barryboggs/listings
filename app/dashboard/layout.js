@@ -24,16 +24,15 @@ const ADMIN_NAV = [
 ];
 
 /**
- * Honest API-health badge. Replaces the pre-Phase 4 indicator that only
- * checked whether SEMRUSH_BEARER_TOKEN was set (which let an expired
- * token silently fail behind a green dot for weeks).
+ * API-health badge. Post-migration, the app talks to one API (Semrush's
+ * "rich" API, Apikey auth), so this reflects the live state of that API.
  *
  * Visual states:
- *   - "API Live"        green   — both APIs healthy (or rich not configured)
- *   - "Rich API issue"  amber   — old API healthy, rich API failing
- *   - "API Error"       red     — old API failing
- *   - "Demo Mode"       yellow  — no old-API token configured
- *   - "Checking…"       gray    — initial load / first request hasn't finished
+ *   - "API Live"    green   — most recent call succeeded
+ *   - "API Error"   red     — most recent call failed
+ *   - "Demo Mode"   yellow  — no SEMRUSH_API_KEY configured
+ *   - "API ready"   blue    — key configured, no calls have flowed yet
+ *   - "Checking…"   gray    — initial load
  *
  * Hovering shows the most recent error message (if any).
  */
@@ -48,49 +47,37 @@ function ApiHealthBadge({ health }) {
     );
   }
 
-  const old = health.oldApi || {};
   const rich = health.richApi || {};
-
   let label, dot, bg, border, color, tooltip;
 
-  if (!old.hasToken) {
+  if (!rich.hasKey) {
     label = "Demo Mode";
     dot = "#fbbf24";
     bg = "#2d1b00";
     border = "#5c3a00";
     color = "#fbbf24";
-    tooltip = "SEMRUSH_BEARER_TOKEN not configured — using seed data";
-  } else if (old.state === "failing") {
+    tooltip = "SEMRUSH_API_KEY not configured — using seed data";
+  } else if (rich.state === "failing") {
     label = "API Error";
     dot = "#f87171";
     bg = "#2d0a0a";
     border = "#5c1a1a";
     color = "#f87171";
-    tooltip = old.lastErrorMessage || "Last Semrush call failed";
-  } else if (rich.hasKey && rich.state === "failing") {
-    label = "Rich API issue";
-    dot = "#fbbf24";
-    bg = "#2d1b00";
-    border = "#5c3a00";
-    color = "#fbbf24";
-    tooltip = `Rich API: ${rich.lastErrorMessage || "last call failed"}`;
-  } else if (old.state === "healthy") {
+    tooltip = rich.lastErrorMessage || "Last Semrush call failed";
+  } else if (rich.state === "healthy") {
     label = "API Live";
     dot = "#34d399";
     bg = "#1a2e1a";
     border = "#2d5a2d";
     color = "#6ee7b7";
-    tooltip = rich.hasKey && rich.state === "healthy"
-      ? "Both APIs responding"
-      : "Old API responding (rich API not yet tested)";
+    tooltip = "Semrush API responding";
   } else {
-    // hasToken but no call yet (cold start, no requests have flowed)
     label = "API ready";
     dot = "#93c5fd";
     bg = "#0c1a2e";
     border = "#1e3a5f";
     color = "#93c5fd";
-    tooltip = "Token configured — no API calls have been made yet from this worker";
+    tooltip = "API key configured — no calls have flowed yet from this worker";
   }
 
   return (
