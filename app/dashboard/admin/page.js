@@ -320,6 +320,8 @@ export default function AdminPage() {
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
+  const [gbpSyncing, setGbpSyncing] = useState(false);
+  const [gbpSyncResult, setGbpSyncResult] = useState(null);
   const [createdCredential, setCreatedCredential] = useState(null);
 
   // Fetch users and brands on mount
@@ -408,6 +410,26 @@ export default function AdminPage() {
     }
     setSaving(false);
     setEditingUser(undefined);
+  };
+
+  const handleSyncGbpMappings = async () => {
+    if (gbpSyncing) return;
+    setGbpSyncing(true);
+    setGbpSyncResult(null);
+    try {
+      const res = await fetch("/api/db/sync-gbp-mappings", { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setGbpSyncResult(data);
+        showToast(`GBP mapping synced: ${data.matched}/${data.shopCount} shops matched`);
+        logActivity("Synced GBP mappings", `${data.matched} matched, ${data.updated} shop rows updated`);
+      } else {
+        showToast(`GBP sync failed: ${data.error || res.status}`);
+      }
+    } catch (e) {
+      showToast(`GBP sync failed: ${e.message}`);
+    }
+    setGbpSyncing(false);
   };
 
   const handleSyncRichMappings = async () => {
@@ -533,6 +555,76 @@ export default function AdminPage() {
               <div className="col-span-2 sm:col-span-4 px-3 py-2 rounded text-[11px]" style={{ background: "#2d0a0a", border: "1px solid #5c1a1a", color: "#f87171" }}>
                 <div className="font-semibold mb-1">Database errors (first {syncResult.dbErrors.length}):</div>
                 {syncResult.dbErrors.map((e, i) => (
+                  <div key={i} className="font-mono text-[10px] leading-snug">{e}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-5 p-4 rounded-lg" style={{ background: "#1a1a1d", border: "1px solid #222" }}>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div>
+            <h4 className="text-xs font-bold" style={{ color: "#aaa" }}>Google Business Profile Integration</h4>
+            <p className="text-[11px] mt-0.5" style={{ color: "#666" }}>
+              Connect the admin Google account (once) and map shops to their GBP locations. Required before any bulk-post-to-GBP feature can run.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <a
+              href="/api/auth/google-bp/start"
+              className="px-3 py-2 rounded-md text-xs font-semibold"
+              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa", textDecoration: "none" }}
+            >
+              Connect Google
+            </a>
+            <button
+              onClick={handleSyncGbpMappings}
+              disabled={gbpSyncing}
+              className="px-4 py-2 rounded-md text-xs font-semibold text-white transition-opacity"
+              style={{ background: "#0ea5e9", opacity: gbpSyncing ? 0.5 : 1 }}
+            >
+              {gbpSyncing ? "Syncing…" : "Sync GBP mappings"}
+            </button>
+          </div>
+        </div>
+        {gbpSyncResult && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] mb-3">
+            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+              <div style={{ color: "#888" }}>GBP accounts</div>
+              <div className="text-base font-bold text-white">{gbpSyncResult.accountCount}</div>
+            </div>
+            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+              <div style={{ color: "#888" }}>GBP locations</div>
+              <div className="text-base font-bold text-white">{gbpSyncResult.gbpLocationCount}</div>
+            </div>
+            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+              <div style={{ color: "#888" }}>Matched</div>
+              <div className="text-base font-bold" style={{ color: "#34d399" }}>{gbpSyncResult.matched}</div>
+            </div>
+            <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+              <div style={{ color: "#888" }}>Shop rows updated</div>
+              <div className="text-base font-bold text-white">{gbpSyncResult.updated}</div>
+            </div>
+            <div className="col-span-2 sm:col-span-4 text-[11px] mt-1" style={{ color: "#666" }}>
+              By strategy — url: {gbpSyncResult.strategies.url} · phone: {gbpSyncResult.strategies.phone} · address: {gbpSyncResult.strategies.address}
+              {gbpSyncResult.unmatched > 0 && ` · unmatched: ${gbpSyncResult.unmatched}`}
+              {gbpSyncResult.ambiguous > 0 && ` · ambiguous: ${gbpSyncResult.ambiguous}`}
+            </div>
+            {gbpSyncResult.perBrand && Object.keys(gbpSyncResult.perBrand).length > 0 && (
+              <div className="col-span-2 sm:col-span-4 text-[11px] mt-1 leading-relaxed" style={{ color: "#888" }}>
+                <span style={{ color: "#aaa" }}>By brand:</span>{" "}
+                {Object.entries(gbpSyncResult.perBrand)
+                  .sort(([, a], [, b]) => b.total - a.total)
+                  .map(([brand, s]) => `${brand}: ${s.matched}/${s.total}`)
+                  .join(" · ")}
+              </div>
+            )}
+            {gbpSyncResult.dbErrors && gbpSyncResult.dbErrors.length > 0 && (
+              <div className="col-span-2 sm:col-span-4 px-3 py-2 rounded text-[11px]" style={{ background: "#2d0a0a", border: "1px solid #5c1a1a", color: "#f87171" }}>
+                <div className="font-semibold mb-1">Database errors (first {gbpSyncResult.dbErrors.length}):</div>
+                {gbpSyncResult.dbErrors.map((e, i) => (
                   <div key={i} className="font-mono text-[10px] leading-snug">{e}</div>
                 ))}
               </div>
