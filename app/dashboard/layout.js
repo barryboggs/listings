@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { href: "/dashboard/pending-approval", icon: "⌛", label: "Pending Approval" },
   { href: "/dashboard/holiday-import", icon: "📅", label: "Holiday Import" },
   { href: "/dashboard/listings-photos", icon: "🖼", label: "Listing Photos" },
+  { href: "/dashboard/gbp-posts", icon: "✦", label: "GBP Posts" },
   { href: "/dashboard/activity", icon: "◷", label: "Activity Log" },
   { href: "/dashboard/api-status", icon: "⟡", label: "API Status" },
 ];

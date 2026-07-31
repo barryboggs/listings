@@ -37,6 +37,25 @@ export async function GET(request) {
   const requestOrigin = new URL(request.url).origin;
   const authUrl = buildAuthorizationUrl({ state, requestOrigin });
 
+  // Diagnostic branch — hit /api/auth/google-bp/start?debug=1 to see the
+  // constructed URL + resolved redirect_uri as JSON instead of redirecting.
+  // Client IDs are safe to expose (they appear in every OAuth flow anyway),
+  // so this helps debug redirect_uri and scope mismatches without leaking
+  // anything the browser wouldn't already see.
+  const wantDebug = new URL(request.url).searchParams.get("debug") === "1";
+  if (wantDebug) {
+    const parsed = new URL(authUrl);
+    const params = Object.fromEntries(parsed.searchParams.entries());
+    return NextResponse.json({
+      requestOrigin,
+      authUrl,
+      params,
+      clientIdConfigured: !!process.env.GOOGLE_BP_CLIENT_ID,
+      clientSecretConfigured: !!process.env.GOOGLE_BP_CLIENT_SECRET,
+      envRedirectUriOverride: process.env.GOOGLE_BP_REDIRECT_URI || null,
+    });
+  }
+
   const res = NextResponse.redirect(authUrl);
   res.cookies.set("gbp-oauth-state", state, {
     httpOnly: true,

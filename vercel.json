@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/gbp/cleanup-expired-offers",
+      "schedule": "0 8 * * *"
+    }
+  ]
+}
