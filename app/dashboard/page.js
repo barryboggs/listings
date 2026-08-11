@@ -83,9 +83,12 @@ export default function LocationsPage() {
       setLocations(data.locations || []);
       setBrands(data.brands || []);
       setDataSource(data.source || "unknown");
-      // First load: activate all brands
+      // First load: no brands active by default. Loading zero rows is
+      // near-instant, whereas rendering all shops across every brand
+      // was noticeably slow on the initial paint (measured seconds on
+      // ~5k rows). Users pick the brand(s) they want to inspect.
       if (!activeBrands && data.brands) {
-        setActiveBrands(new Set(data.brands.map((b) => b.id)));
+        setActiveBrands(new Set());
       }
     } catch {
       setDataSource("error");
@@ -101,7 +104,7 @@ export default function LocationsPage() {
   const toggleBrand = (id) => {
     const next = new Set(activeBrands);
     next.has(id) ? next.delete(id) : next.add(id);
-    if (next.size > 0) setActiveBrands(next);
+    setActiveBrands(next);
   };
 
   // Status distribution across the full location list (not filtered).
