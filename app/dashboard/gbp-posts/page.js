@@ -70,6 +70,11 @@ export default function GbpPostsPage() {
   const [brandFilter, setBrandFilter] = useState("");
   const [deselectedShopIds, setDeselectedShopIds] = useState(() => new Set());
   const [showShopList, setShowShopList] = useState(false);
+  const [shopSearch, setShopSearch] = useState("");
+  // Batch controls — supports the "post one version to 50 shops, then
+  // a different version to the next 50" workflow. Batch size default 50
+  // aligns with the server-side chunk cap on /api/gbp/bulk-post.
+  const [batchSize, setBatchSize] = useState(50);
 
   // Composer
   const [topicType, setTopicType] = useState("STANDARD");
@@ -172,17 +177,68 @@ export default function GbpPostsPage() {
     [brandShops]
   );
 
+  // Search-filtered subset. Substring match on shop_id / city / state,
+  // case-insensitive. Empty search = whole list. The batch selector
+  // and Select/Deselect all operate on THIS list, so the admin can
+  // narrow to a region ("TX") and batch-select within it.
+  const filteredShops = useMemo(() => {
+    if (!shopSearch.trim()) return eligibleShops;
+    const q = shopSearch.trim().toLowerCase();
+    return eligibleShops.filter((s) =>
+      (s.shop_id || "").toLowerCase().includes(q) ||
+      (s.city || "").toLowerCase().includes(q) ||
+      (s.state || "").toLowerCase().includes(q)
+    );
+  }, [eligibleShops, shopSearch]);
+
   const selectedShops = useMemo(
     () => eligibleShops.filter((s) => !deselectedShopIds.has(s.shop_id)),
     [eligibleShops, deselectedShopIds]
   );
+
+  // Batches computed from the filtered (or full) list. Each batch is a
+  // slice of `batchSize` shops. The dropdown shows one entry per batch
+  // with human-readable range labels ("Shops 1-50", "Shops 51-100", ...).
+  // Sort is stable (shops arrive already ordered by shop_id from
+  // /api/shops), so batch #N always contains the same shops until the
+  // brand's shop set changes.
+  const batches = useMemo(() => {
+    const size = Math.max(1, batchSize);
+    const out = [];
+    for (let i = 0; i < filteredShops.length; i += size) {
+      const chunk = filteredShops.slice(i, i + size);
+      out.push({
+        index: out.length + 1,
+        startPos: i + 1,
+        endPos: i + chunk.length,
+        shopIds: chunk.map((s) => s.shop_id),
+      });
+    }
+    return out;
+  }, [filteredShops, batchSize]);
 
   const unmappedCount = brandShops.length - eligibleShops.length;
 
   // Reset deselection when brand changes
   useEffect(() => {
     setDeselectedShopIds(new Set());
+    setShopSearch("");
   }, [brandFilter]);
+
+  // Selecting a batch clears any existing selection and picks JUST that
+  // batch's shops. Handles the "post version A to shops 1-50, then a
+  // different version to 51-100" workflow directly.
+  const selectBatch = (batchIndex) => {
+    const b = batches.find((x) => x.index === batchIndex);
+    if (!b) return;
+    const idsInBatch = new Set(b.shopIds);
+    // Deselect everything NOT in this batch (deselection set is the inverse
+    // of selection — anything not in this set is selected).
+    const nextDeselected = new Set(eligibleShops.map((s) => s.shop_id).filter((id) => !idsInBatch.has(id)));
+    setDeselectedShopIds(nextDeselected);
+    // If the list is collapsed, no visual confirmation — pop it open.
+    setShowShopList(true);
+  };
 
   // --- Image upload (reuse the same endpoint as listings-photos) ---
 
@@ -789,6 +845,11 @@ export default function GbpPostsPage() {
               <div>
                 <div className="text-sm font-semibold text-white">
                   {selectedShops.length} of {eligibleShops.length} {brandCfg?.name} shops selected
+                  {shopSearch.trim() && (
+                    <span className="ml-2 text-[11px] font-normal" style={{ color: "#93c5fd" }}>
+                      ({filteredShops.length} match &ldquo;{shopSearch.trim()}&rdquo;)
+                    </span>
+                  )}
                 </div>
                 {unmappedCount > 0 && (
                   <div className="text-[11px] mt-0.5" style={{ color: "#fbbf24" }}>
@@ -796,32 +857,45 @@ export default function GbpPostsPage() {
                   </div>
                 )}
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap justify-end">
                 <button
-                  onClick={() => setDeselectedShopIds(new Set())}
-                  disabled={deselectedShopIds.size === 0}
+                  onClick={() => {
+                    // Select-all respects the search filter: unfilters
+                    // shops stay in their current state, filtered shops
+                    // all become selected.
+                    const next = new Set(deselectedShopIds);
+                    for (const s of filteredShops) next.delete(s.shop_id);
+                    setDeselectedShopIds(next);
+                  }}
+                  disabled={filteredShops.every((s) => !deselectedShopIds.has(s.shop_id))}
                   className="text-xs px-3 py-1.5 rounded"
                   style={{
                     background: "#1c1c1f",
                     border: "1px solid #2a2a2e",
-                    color: deselectedShopIds.size === 0 ? "#555" : "#aaa",
-                    opacity: deselectedShopIds.size === 0 ? 0.5 : 1,
+                    color: "#aaa",
                   }}
+                  title={shopSearch.trim() ? "Selects only shops matching the search" : "Selects every eligible shop"}
                 >
-                  Select all
+                  {shopSearch.trim() ? "Select matches" : "Select all"}
                 </button>
                 <button
-                  onClick={() => setDeselectedShopIds(new Set(eligibleShops.map((s) => s.shop_id)))}
-                  disabled={selectedShops.length === 0}
+                  onClick={() => {
+                    // Deselect-all also respects the filter — narrows to
+                    // "deselect the matches" when a search is active.
+                    const next = new Set(deselectedShopIds);
+                    for (const s of filteredShops) next.add(s.shop_id);
+                    setDeselectedShopIds(next);
+                  }}
+                  disabled={filteredShops.every((s) => deselectedShopIds.has(s.shop_id))}
                   className="text-xs px-3 py-1.5 rounded"
                   style={{
                     background: "#1c1c1f",
                     border: "1px solid #2a2a2e",
-                    color: selectedShops.length === 0 ? "#555" : "#aaa",
-                    opacity: selectedShops.length === 0 ? 0.5 : 1,
+                    color: "#aaa",
                   }}
+                  title={shopSearch.trim() ? "Deselects only shops matching the search" : "Deselects every shop"}
                 >
-                  Deselect all
+                  {shopSearch.trim() ? "Deselect matches" : "Deselect all"}
                 </button>
                 <button
                   onClick={() => setShowShopList(!showShopList)}
@@ -832,12 +906,73 @@ export default function GbpPostsPage() {
                 </button>
               </div>
             </div>
+
+            {/* Batch controls — for the "post version A to 50 shops, then a
+                different version to the next 50" workflow. */}
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 mb-3 pt-3" style={{ borderTop: "1px solid #2a2a2e" }}>
+              <div className="sm:col-span-6">
+                <label className="block text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: "#666" }}>
+                  Search shops
+                </label>
+                <input
+                  type="text"
+                  value={shopSearch}
+                  onChange={(e) => setShopSearch(e.target.value)}
+                  placeholder="Shop ID, city, or state"
+                  className="w-full px-3 py-2 rounded-md text-xs"
+                  style={{ background: "#0c0c0e", border: "1px solid #2a2a2e", color: "#e8e8e8" }}
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: "#666" }}>
+                  Batch size
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={batchSize}
+                  onChange={(e) => setBatchSize(Math.max(1, Math.min(50, Number(e.target.value) || 50)))}
+                  className="w-full px-3 py-2 rounded-md text-xs font-mono"
+                  style={{ background: "#0c0c0e", border: "1px solid #2a2a2e", color: "#e8e8e8" }}
+                />
+              </div>
+              <div className="sm:col-span-4">
+                <label className="block text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: "#666" }}>
+                  Jump to batch (replaces selection)
+                </label>
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    if (n) selectBatch(n);
+                  }}
+                  disabled={batches.length === 0}
+                  className="w-full px-3 py-2 rounded-md text-xs"
+                  style={{ background: "#0c0c0e", border: "1px solid #2a2a2e", color: "#e8e8e8" }}
+                >
+                  <option value="">— Select batch —</option>
+                  {batches.map((b) => (
+                    <option key={b.index} value={b.index}>
+                      Batch {b.index} · shops {b.startPos}-{b.endPos} of {filteredShops.length}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
             {showShopList && (
               <div className="max-h-72 overflow-y-auto space-y-1" style={{ borderTop: "1px solid #2a2a2e", paddingTop: 12 }}>
-                {eligibleShops.map((s) => {
+                {filteredShops.length === 0 && (
+                  <div className="text-[11px] py-3 text-center" style={{ color: "#666" }}>
+                    No shops match &ldquo;{shopSearch.trim()}&rdquo;.
+                  </div>
+                )}
+                {filteredShops.map((s, i) => {
                   const on = !deselectedShopIds.has(s.shop_id);
                   return (
                     <label key={s.shop_id} className="flex items-center gap-2 text-xs py-1 cursor-pointer" style={{ color: on ? "#e8e8e8" : "#555" }}>
+                      <span className="font-mono text-[10px] text-right" style={{ color: "#555", minWidth: 32 }}>{i + 1}.</span>
                       <input
                         type="checkbox"
                         checked={on}
