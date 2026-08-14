@@ -20,6 +20,7 @@ const NAV_ITEMS = [
 ];
 
 const ADMIN_NAV = [
+  { href: "/dashboard/reviews", icon: "★", label: "Reviews (GBP)" },
   { href: "/dashboard/admin", icon: "⚙", label: "User Management" },
   { href: "/dashboard/shops", icon: "#", label: "Shop Numbers" },
 ];
