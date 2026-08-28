@@ -191,6 +191,17 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
 
   const handleSave = async () => {
     if (saving) return;
+
+    // Guard against saving temp_closed with no reopen date. status is
+    // server-side derived from reopen_date, so without a date the save
+    // silently no-ops (Semrush accepts null → next fetch derives status
+    // back to "active"). Report via richSaveError so the message appears
+    // inline in the modal instead of vanishing behind the closed modal.
+    if (formData.status === "temp_closed" && !formData.reopenDate) {
+      setRichSaveError("Please pick an expected reopen date. Temporarily Closed status is anchored to that date — without it, the shop stays Active.");
+      return;
+    }
+
     setSaving(true);
     setRichSaveError(null);
 
@@ -478,7 +489,24 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
                 { value: "temp_closed", label: "Temporarily Closed", desc: "Shows reopen date across directories" },
               ].map((opt) => (
                 <label key={opt.value} className="flex gap-3 p-3.5 rounded-lg cursor-pointer transition-colors" style={{ background: formData.status === opt.value ? "#1c1c1f" : "transparent", border: `1px solid ${formData.status === opt.value ? brandColor + "60" : "#2a2a2e"}` }}>
-                  <input type="radio" name="status" checked={formData.status === opt.value} onChange={() => setFormData({ ...formData, status: opt.value, reopenDate: opt.value === "active" ? null : formData.reopenDate })} style={{ accentColor: brandColor, marginTop: "2px" }} />
+                  <input type="radio" name="status" checked={formData.status === opt.value} onChange={() => {
+                    // Auto-default reopenDate to +30 days when switching
+                    // to Temp Closed with no existing date. status is
+                    // derived server-side from reopen_date (rich.reopen_date
+                    // ? "temp_closed" : "active"), so saving temp_closed
+                    // with a null reopen_date silently reverts to active
+                    // on the next fetch. Defaulting here avoids that trap;
+                    // user can override with the date picker below.
+                    let nextReopen = formData.reopenDate;
+                    if (opt.value === "active") {
+                      nextReopen = null;
+                    } else if (opt.value === "temp_closed" && !formData.reopenDate) {
+                      const d = new Date();
+                      d.setDate(d.getDate() + 30);
+                      nextReopen = d.toISOString().slice(0, 10);
+                    }
+                    setFormData({ ...formData, status: opt.value, reopenDate: nextReopen });
+                  }} style={{ accentColor: brandColor, marginTop: "2px" }} />
                   <div>
                     <div className="text-sm font-semibold text-white">{opt.label}</div>
                     <div className="text-xs mt-0.5" style={{ color: "#777" }}>{opt.desc}</div>
