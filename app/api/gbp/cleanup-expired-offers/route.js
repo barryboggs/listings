@@ -36,6 +36,8 @@ const LIMIT = 500;
  * Query params:
  *   ?dry=1                 → find rows and report counts, don't delete
  *   ?before=YYYY-MM-DD     → override "today" for backfill / test runs
+ *   ?brand=<brand>         → scope to one brand (diagnostic — the
+ *                            scheduled cron runs against ALL brands)
  *
  * Response:
  *   {
@@ -63,6 +65,7 @@ async function runCleanup(request) {
   const url = new URL(request.url);
   const dryRun = url.searchParams.get("dry") === "1";
   const beforeDate = url.searchParams.get("before") || null;
+  const brand = url.searchParams.get("brand") || null;
 
   // Determine auth: try admin cookie first, then CRON_SECRET header.
   let user = null;
@@ -88,17 +91,22 @@ async function runCleanup(request) {
   }
 
   const cutoffDate = beforeDate || new Date().toISOString().slice(0, 10);
-  const expired = await findExpiredOfferPushes({ beforeDate: cutoffDate, limit: LIMIT });
+  const expired = await findExpiredOfferPushes({ beforeDate: cutoffDate, brand, limit: LIMIT });
 
   if (dryRun) {
+    // Return up to 100 rows in the sample when brand-scoped (typical
+    // diagnostic use) or 25 for unscoped runs — the previous cap of 5
+    // hid rows the admin was specifically looking for.
+    const sampleCap = brand ? 100 : 25;
     return NextResponse.json({
       ranAt: new Date().toISOString(),
       dryRun: true,
+      brand: brand || "*",
       found: expired.length,
       deleted: 0,
       failed: 0,
       cutoffDate,
-      sampleRows: expired.slice(0, 5).map((r) => ({
+      sampleRows: expired.slice(0, sampleCap).map((r) => ({
         id: r.id,
         shopId: r.shop_id,
         brand: r.brand,
