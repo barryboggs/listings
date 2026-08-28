@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useUser } from "../layout";
 import { getBrandConfig } from "@/lib/data";
 
@@ -74,9 +74,17 @@ export default function ReviewsPage() {
 
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
+  const [syncProgress, setSyncProgress] = useState(null);
   const [enriching, setEnriching] = useState(false);
   const [enrichResult, setEnrichResult] = useState(null);
+  const [enrichProgress, setEnrichProgress] = useState(null);
   const [toast, setToast] = useState(null);
+
+  // Refs so the Stop button can flip a flag that in-flight loops poll.
+  // Set to true when user hits Stop; loops check between chunks/batches
+  // and exit gracefully — everything already written stays in the DB.
+  const syncCancelRef = useRef(false);
+  const enrichCancelRef = useRef(false);
 
   const showToast = (msg, isError) => {
     setToast({ msg, isError });
@@ -134,73 +142,227 @@ export default function ReviewsPage() {
 
   const brandLabel = (id) => brands.find((b) => b.id === id)?.name || id;
 
-  const handleSync = async () => {
+  // Chunk shops on the client side so each server call processes a
+  // manageable slice (30 shops) that comfortably fits in Vercel's 5-min
+  // maxDuration. Live progress panel updates after every chunk. Stop
+  // button flips a ref the loop polls between chunks.
+  const SYNC_CHUNK_SIZE = 30;
+  const SYNC_INTER_CHUNK_DELAY_MS = 500;
+
+  const handleSync = async ({ fullResync = false } = {}) => {
     if (syncing || !brand) return;
-    if (!confirm(`Sync reviews for ${brandLabel(brand)}? This may take a few minutes for large brands.`)) return;
+    const msg = fullResync
+      ? `Full re-sync of ${brandLabel(brand)}? Bypasses the incremental optimization — walks every shop's full review history from Google. Slower but catches deletions.`
+      : `Sync new/updated reviews for ${brandLabel(brand)}? Uses incremental optimization (skips reviews we already have).`;
+    if (!confirm(msg)) return;
+
+    // Grab the target shop_ids up front so we can chunk. If the brand's
+    // shop list somehow shifts mid-sync (unlikely), the chunks stay
+    // pinned to the initial snapshot.
+    const brandEligibleShopIds = shops
+      .filter((s) => s.brand === brand && s.gbp_location_id)
+      .map((s) => s.shop_id);
+
+    if (brandEligibleShopIds.length === 0) {
+      showToast(`No mapped shops for ${brandLabel(brand)} — run mapping sync first`, true);
+      return;
+    }
+
+    const chunks = [];
+    for (let i = 0; i < brandEligibleShopIds.length; i += SYNC_CHUNK_SIZE) {
+      chunks.push(brandEligibleShopIds.slice(i, i + SYNC_CHUNK_SIZE));
+    }
+
     setSyncing(true);
     setSyncResult(null);
-    try {
-      const res = await fetch("/api/gbp/sync-reviews", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brand }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSyncResult(data);
-        showToast(`Synced ${data.reviewsFetched} reviews across ${data.shopsProcessed} shops`);
-        // Re-fetch report so numbers refresh
-        setTimeout(() => {
-          fetch(`/api/gbp/reviews-report?brand=${encodeURIComponent(brand)}&month=${month}`)
-            .then((r) => r.json())
-            .then(setReport)
-            .catch(() => {});
-        }, 500);
-      } else {
-        showToast(data.error || "Sync failed", true);
+    syncCancelRef.current = false;
+
+    let totalShopsProcessed = 0;
+    let totalShopsSkipped = 0;
+    let totalReviewsFetched = 0;
+    let totalInserted = 0;
+    let totalShortCircuited = 0;
+    const errors = [];
+
+    setSyncProgress({
+      phase: "starting",
+      chunk: 0, totalChunks: chunks.length,
+      totalShops: brandEligibleShopIds.length,
+      shopsProcessed: 0, shopsSkipped: 0,
+      reviewsFetched: 0, inserted: 0, shortCircuited: 0,
+      errors: [],
+    });
+
+    for (let i = 0; i < chunks.length; i++) {
+      if (syncCancelRef.current) {
+        setSyncProgress((p) => ({ ...p, phase: "cancelled", chunk: i }));
+        break;
       }
-    } catch (e) {
-      showToast(e.message, true);
+      setSyncProgress((p) => ({ ...p, phase: "fetching", chunk: i + 1 }));
+
+      try {
+        const res = await fetch("/api/gbp/sync-reviews", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ brand, shopIds: chunks[i], fullResync }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          totalShopsProcessed += data.shopsProcessed || 0;
+          totalShopsSkipped += data.shopsSkipped || 0;
+          totalReviewsFetched += data.reviewsFetched || 0;
+          totalInserted += data.inserted || 0;
+          totalShortCircuited += data.shortCircuited || 0;
+          if (Array.isArray(data.errors)) {
+            for (const e of data.errors) {
+              if (errors.length < 30) errors.push(e);
+            }
+          }
+        } else {
+          totalShopsSkipped += chunks[i].length;
+          if (errors.length < 30) errors.push({ shopId: "chunk", error: data.error || `HTTP ${res.status}` });
+        }
+      } catch (e) {
+        totalShopsSkipped += chunks[i].length;
+        if (errors.length < 30) errors.push({ shopId: "chunk", error: e.message });
+      }
+
+      setSyncProgress({
+        phase: "fetching",
+        chunk: i + 1, totalChunks: chunks.length,
+        totalShops: brandEligibleShopIds.length,
+        shopsProcessed: totalShopsProcessed,
+        shopsSkipped: totalShopsSkipped,
+        reviewsFetched: totalReviewsFetched,
+        inserted: totalInserted,
+        shortCircuited: totalShortCircuited,
+        errors,
+      });
+
+      if (i < chunks.length - 1) {
+        await new Promise((r) => setTimeout(r, SYNC_INTER_CHUNK_DELAY_MS));
+      }
     }
+
+    setSyncProgress((p) => ({
+      ...(p || {}),
+      phase: syncCancelRef.current ? "cancelled" : "done",
+    }));
+    setSyncResult({
+      shopsProcessed: totalShopsProcessed,
+      shopsSkipped: totalShopsSkipped,
+      reviewsFetched: totalReviewsFetched,
+      inserted: totalInserted,
+      shortCircuited: totalShortCircuited,
+      errors,
+    });
     setSyncing(false);
+
+    const cancelSuffix = syncCancelRef.current ? " (stopped)" : "";
+    const shortNote = totalShortCircuited > 0 ? ` · ${totalShortCircuited} shops short-circuited by incremental` : "";
+    showToast(`Synced ${totalReviewsFetched} reviews across ${totalShopsProcessed} shops${shortNote}${cancelSuffix}`);
+
+    fetch(`/api/gbp/reviews-report?brand=${encodeURIComponent(brand)}&month=${month}`)
+      .then((r) => r.json())
+      .then(setReport)
+      .catch(() => {});
   };
 
-  // Scope enrichment to the CURRENTLY-VIEWED month. Matches the AGN
-  // team's use case (monthly reports) and keeps cost/time proportional
-  // to a single month's reviews (~5-15% of all-time). If they want all
-  // months enriched later, we can add an "Enrich all months" secondary
-  // button; for now, per-month matches the report shape.
+  const requestSyncStop = () => {
+    syncCancelRef.current = true;
+    setSyncProgress((p) => (p ? { ...p, phase: "stopping" } : p));
+  };
+
+  // Enrichment auto-continues until remaining=0 or user hits Stop.
+  // Server returns the exact remaining count (via countUnenrichedReviews)
+  // so the progress bar is accurate instead of "1+" indeterminate.
   const handleEnrich = async () => {
     if (enriching || !brand || !month) return;
     setEnriching(true);
     setEnrichResult(null);
-    try {
-      const res = await fetch("/api/gbp/enrich-reviews", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brand, month }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setEnrichResult(data);
-        const remainingNote = data.remaining && data.remaining !== 0
-          ? ` — more remain, re-run to continue`
-          : "";
-        const label = monthOptions.find((o) => o.value === month)?.label || month;
-        showToast(`Enriched ${data.enriched} reviews for ${label}${remainingNote}`);
-        setTimeout(() => {
-          fetch(`/api/gbp/reviews-report?brand=${encodeURIComponent(brand)}&month=${month}`)
-            .then((r) => r.json())
-            .then(setReport)
-            .catch(() => {});
-        }, 500);
-      } else {
-        showToast(data.error || "Enrichment failed", true);
+    enrichCancelRef.current = false;
+
+    let totalEnriched = 0;
+    let iterations = 0;
+    const errors = [];
+    let initialRemaining = null;
+
+    setEnrichProgress({
+      phase: "starting",
+      iterations: 0,
+      totalEnriched: 0,
+      remaining: null,
+      initialRemaining: null,
+      errors: [],
+    });
+
+    while (true) {
+      if (enrichCancelRef.current) break;
+      iterations++;
+      setEnrichProgress((p) => ({ ...(p || {}), phase: "analyzing", iterations }));
+
+      try {
+        const res = await fetch("/api/gbp/enrich-reviews", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ brand, month }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          if (errors.length < 10) errors.push({ iteration: iterations, error: data.error || `HTTP ${res.status}` });
+          break;
+        }
+        totalEnriched += data.enriched || 0;
+        if (Array.isArray(data.errors)) {
+          for (const e of data.errors) {
+            if (errors.length < 10) errors.push({ iteration: iterations, ...e });
+          }
+        }
+        // First iteration's total = initial estimate (enriched + remaining)
+        // so the progress bar has a meaningful denominator.
+        if (initialRemaining == null) {
+          initialRemaining = (data.enriched || 0) + (typeof data.remaining === "number" ? data.remaining : 0);
+        }
+        setEnrichProgress({
+          phase: "analyzing",
+          iterations,
+          totalEnriched,
+          remaining: data.remaining,
+          initialRemaining,
+          errors,
+        });
+
+        // Done — no more unenriched rows in scope.
+        if (typeof data.remaining === "number" && data.remaining === 0) break;
+        // Safety: if the server reports it didn't enrich anything but says
+        // rows remain, something's stuck. Bail rather than loop forever.
+        if ((data.enriched || 0) === 0) {
+          if (errors.length < 10) errors.push({ iteration: iterations, error: "Iteration enriched 0 rows despite remaining>0 — stopping to avoid infinite loop" });
+          break;
+        }
+      } catch (e) {
+        if (errors.length < 10) errors.push({ iteration: iterations, error: e.message });
+        break;
       }
-    } catch (e) {
-      showToast(e.message, true);
     }
+
+    setEnrichProgress((p) => ({ ...(p || {}), phase: enrichCancelRef.current ? "cancelled" : "done" }));
+    setEnrichResult({ enriched: totalEnriched, iterations, errors });
     setEnriching(false);
+
+    const label = monthOptions.find((o) => o.value === month)?.label || month;
+    const cancelSuffix = enrichCancelRef.current ? " (stopped)" : "";
+    showToast(`Enriched ${totalEnriched} reviews for ${label}${cancelSuffix}`);
+
+    fetch(`/api/gbp/reviews-report?brand=${encodeURIComponent(brand)}&month=${month}`)
+      .then((r) => r.json())
+      .then(setReport)
+      .catch(() => {});
+  };
+
+  const requestEnrichStop = () => {
+    enrichCancelRef.current = true;
+    setEnrichProgress((p) => (p ? { ...p, phase: "stopping" } : p));
   };
 
   const brandColor = brands.find((b) => b.id === brand)?.color || "#888";
@@ -267,23 +429,55 @@ export default function ReviewsPage() {
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
-          <button
-            onClick={handleSync}
-            disabled={syncing || !brand}
-            className="px-3 py-2 rounded-md text-xs font-semibold text-white"
-            style={{ background: "#0ea5e9", opacity: syncing ? 0.5 : 1 }}
-          >
-            {syncing ? "Syncing…" : "Sync reviews"}
-          </button>
-          <button
-            onClick={handleEnrich}
-            disabled={enriching || !brand}
-            className="px-3 py-2 rounded-md text-xs font-semibold"
-            style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#a78bfa", opacity: enriching ? 0.5 : 1 }}
-            title={`Analyzes only the reviews shown in the current month (${monthLabel}). Cheap and fast.`}
-          >
-            {enriching ? "Analyzing…" : `Analyze themes for ${monthLabel}`}
-          </button>
+          {syncing ? (
+            <button
+              onClick={requestSyncStop}
+              className="px-3 py-2 rounded-md text-xs font-semibold"
+              style={{ background: "#2d0a0a", border: "1px solid #5c1a1a", color: "#f87171" }}
+            >
+              Stop sync
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => handleSync({ fullResync: false })}
+                disabled={!brand}
+                className="px-3 py-2 rounded-md text-xs font-semibold text-white"
+                style={{ background: "#0ea5e9" }}
+                title="Fast incremental sync — skips reviews we already have. Use for regular refreshes."
+              >
+                Sync reviews
+              </button>
+              <button
+                onClick={() => handleSync({ fullResync: true })}
+                disabled={!brand}
+                className="px-2 py-2 rounded-md text-xs"
+                style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#888" }}
+                title="Full re-sync — walks every review from scratch. Slow, but catches deletions on Google's side."
+              >
+                Full
+              </button>
+            </>
+          )}
+          {enriching ? (
+            <button
+              onClick={requestEnrichStop}
+              className="px-3 py-2 rounded-md text-xs font-semibold"
+              style={{ background: "#2d0a0a", border: "1px solid #5c1a1a", color: "#f87171" }}
+            >
+              Stop analysis
+            </button>
+          ) : (
+            <button
+              onClick={handleEnrich}
+              disabled={!brand}
+              className="px-3 py-2 rounded-md text-xs font-semibold"
+              style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#a78bfa" }}
+              title={`Analyzes all reviews for ${monthLabel} that aren't already enriched. Auto-continues across batches.`}
+            >
+              {`Analyze themes for ${monthLabel}`}
+            </button>
+          )}
           <a
             href={brand && month ? `/api/gbp/reviews-export?brand=${encodeURIComponent(brand)}&month=${month}` : "#"}
             className="px-3 py-2 rounded-md text-xs font-semibold"
@@ -301,6 +495,15 @@ export default function ReviewsPage() {
           </a>
         </div>
       </div>
+
+      {/* Live progress panels — shown while sync or enrich is running,
+          then remain visible with final state until the user re-triggers. */}
+      {syncProgress && (
+        <SyncProgressPanel progress={syncProgress} />
+      )}
+      {enrichProgress && (
+        <EnrichProgressPanel progress={enrichProgress} />
+      )}
 
       {loading && (
         <div className="text-center py-12 text-xs" style={{ color: "#666" }}>Loading report…</div>
@@ -368,19 +571,9 @@ export default function ReviewsPage() {
             <RatingDistribution distribution={stats.distribution} total={stats.total} />
           </div>
 
-          {syncResult && (
-            <div className="mb-5 p-3 rounded text-xs" style={{ background: "#1a1a1d", border: "1px solid #222", color: "#aaa" }}>
-              Last sync: {syncResult.shopsProcessed}/{syncResult.shopsProcessed + syncResult.shopsSkipped} shops · {syncResult.reviewsFetched} reviews fetched
-              {syncResult.errors && ` · ${syncResult.errors.length} shops errored`}
-            </div>
-          )}
-
-          {enrichResult && (
-            <div className="mb-5 p-3 rounded text-xs" style={{ background: "#1a1a1d", border: "1px solid #222", color: "#aaa" }}>
-              Last analysis: {enrichResult.enriched} reviews analyzed{enrichResult.remaining > 0 ? ` · ${enrichResult.remaining} still to process` : ""}
-              {enrichResult.errors && ` · ${enrichResult.errors.length} errors`}
-            </div>
-          )}
+          {/* Progress panels above now show the same info live during
+              the run and the final counts after completion; the small
+              "last sync" / "last analysis" rows are redundant. */}
         </>
       )}
     </>
@@ -457,6 +650,100 @@ function RatingDistribution({ distribution, total }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// -------- Progress panels for sync + enrich --------
+
+function ProgressBar({ value, max, color = "#0ea5e9" }) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+  return (
+    <div className="h-1.5 rounded overflow-hidden" style={{ background: "#1a1a1d" }}>
+      <div className="h-full transition-all duration-300" style={{ width: `${pct}%`, background: color }} />
+    </div>
+  );
+}
+
+function SyncProgressPanel({ progress }) {
+  const {
+    phase, chunk, totalChunks, totalShops,
+    shopsProcessed, shopsSkipped, reviewsFetched,
+    inserted, shortCircuited, errors,
+  } = progress;
+  const isRunning = phase === "starting" || phase === "fetching";
+  const done = phase === "done";
+  const cancelled = phase === "cancelled" || phase === "stopping";
+  const accent = cancelled ? "#f87171" : done ? "#34d399" : "#0ea5e9";
+  const label = phase === "stopping" ? "Stopping…"
+    : cancelled ? "Sync cancelled"
+    : done ? "Sync complete"
+    : `Syncing… chunk ${chunk}/${totalChunks}`;
+
+  return (
+    <div className="rounded-xl p-4 mb-3" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+      <div className="flex justify-between items-center mb-2">
+        <div className="text-xs font-bold" style={{ color: accent }}>{label}</div>
+        <div className="text-[10px]" style={{ color: "#666" }}>
+          {shopsProcessed + shopsSkipped}/{totalShops} shops · {reviewsFetched} reviews landed
+          {shortCircuited > 0 && ` · ${shortCircuited} short-circuited by incremental`}
+          {shopsSkipped > 0 && ` · ${shopsSkipped} skipped`}
+        </div>
+      </div>
+      <ProgressBar value={chunk} max={totalChunks} color={accent} />
+      {isRunning && (
+        <div className="text-[10px] mt-1" style={{ color: "#555" }}>
+          Client is chunking shops so each server call fits under the 5-min function timeout. Safe to leave the tab open.
+        </div>
+      )}
+      {errors && errors.length > 0 && (
+        <div className="mt-2 p-2 rounded max-h-24 overflow-y-auto text-[10px] font-mono" style={{ background: "#2d0a0a20", border: "1px solid #5c1a1a40", color: "#f87171" }}>
+          {errors.slice(0, 10).map((e, i) => (
+            <div key={i}>{e.shopId}: {e.error}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EnrichProgressPanel({ progress }) {
+  const {
+    phase, iterations, totalEnriched, remaining, initialRemaining, errors,
+  } = progress;
+  const isRunning = phase === "starting" || phase === "analyzing";
+  const done = phase === "done";
+  const cancelled = phase === "cancelled" || phase === "stopping";
+  const accent = cancelled ? "#f87171" : done ? "#34d399" : "#a78bfa";
+  const label = phase === "stopping" ? "Stopping…"
+    : cancelled ? "Analysis cancelled"
+    : done ? "Analysis complete"
+    : `Analyzing… batch ${iterations}`;
+
+  const target = initialRemaining || (totalEnriched + (typeof remaining === "number" ? remaining : 0));
+
+  return (
+    <div className="rounded-xl p-4 mb-3" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+      <div className="flex justify-between items-center mb-2">
+        <div className="text-xs font-bold" style={{ color: accent }}>{label}</div>
+        <div className="text-[10px]" style={{ color: "#666" }}>
+          {totalEnriched}{target ? `/${target}` : ""} enriched
+          {typeof remaining === "number" && ` · ${remaining} remaining`}
+        </div>
+      </div>
+      <ProgressBar value={totalEnriched} max={target || 1} color={accent} />
+      {isRunning && (
+        <div className="text-[10px] mt-1" style={{ color: "#555" }}>
+          Auto-continues across batches until all reviews for this month are analyzed. Each batch commits to the DB as it completes.
+        </div>
+      )}
+      {errors && errors.length > 0 && (
+        <div className="mt-2 p-2 rounded max-h-24 overflow-y-auto text-[10px] font-mono" style={{ background: "#2d0a0a20", border: "1px solid #5c1a1a40", color: "#f87171" }}>
+          {errors.slice(0, 10).map((e, i) => (
+            <div key={i}>batch {e.iteration}: {e.error}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

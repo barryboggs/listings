@@ -3,6 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { verifyToken } from "@/lib/auth";
 import {
   getUnenrichedReviews,
+  countUnenrichedReviews,
   upsertReviewEnrichments,
   initDatabase,
   logActivity,
@@ -240,11 +241,11 @@ export async function POST(request) {
     }
   }
 
-  // Estimate how many more reviews are waiting in the SAME scope
-  // (respect monthStr filter so "0 remaining" is accurate for the
-  // current report). Fresh count is cheap.
-  const stillPending = await getUnenrichedReviews({ brand, monthStr, limit: 1 });
-  const remaining = stillPending.length > 0 ? "1+" : 0;
+  // Exact count of what's still waiting in the same scope. Drives an
+  // accurate client-side progress bar on the auto-continue loop —
+  // previously we returned "1+" as a hint, which forced the UI to
+  // show indeterminate progress.
+  const remaining = await countUnenrichedReviews({ brand, monthStr });
   // The "1+" is a hint that there's more work; we don't want to run
   // an unbounded COUNT(*) here. Admin can just re-click to keep going.
 

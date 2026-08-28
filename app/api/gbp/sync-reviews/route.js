@@ -4,6 +4,7 @@ import { listReviews, starRatingToInt, getGoogleBpStatus } from "@/lib/google-bp
 import {
   getShopNumbers,
   upsertReviews,
+  getKnownReviewsForShops,
   initDatabase,
   logActivity,
 } from "@/lib/db";
@@ -31,11 +32,22 @@ const MAX_PAGES_PER_SHOP = 100;
  *   {
  *     brand?: "autoglass" | "*",   // "*" or omitted → all brands
  *     shopIds?: ["1234", ...],      // optional explicit target list
- *     incremental?: boolean,        // if true, stops paginating a shop
- *                                    // as soon as it sees a review we
- *                                    // already have with same updateTime.
- *                                    // Speeds up repeat syncs enormously.
+ *     fullResync?: boolean,         // if true, bypass the incremental
+ *                                    // optimization and paginate every
+ *                                    // shop's reviews to the end. Slower
+ *                                    // but catches Google-side deletions
+ *                                    // (a review disappearing from their
+ *                                    // list). Recommended for the periodic
+ *                                    // full refresh; default (false) is
+ *                                    // the fast path for regular syncs.
  *   }
+ *
+ * Incremental optimization (default): we pre-load the review_names +
+ * google_updated_at already stored for the target shops, then break out
+ * of a shop's pagination as soon as we hit a review we already have with
+ * a matching updateTime. Google's list is ordered by updateTime desc,
+ * so everything past that point is guaranteed unchanged. Turns a repeat
+ * sync of AGN from ~90 min → a few seconds when there are no new reviews.
  *
  * Response:
  *   {
@@ -65,6 +77,7 @@ export async function POST(request) {
   const body = await request.json().catch(() => ({}));
   const brand = body.brand && body.brand !== "*" ? body.brand : null;
   const explicitShopIds = Array.isArray(body.shopIds) ? new Set(body.shopIds) : null;
+  const fullResync = !!body.fullResync;
 
   const allShops = await getShopNumbers();
   const eligible = allShops.filter((s) => {
@@ -90,12 +103,22 @@ export async function POST(request) {
   let shopsSkipped = 0;
   let reviewsFetched = 0;
   let inserted = 0;
+  let shortCircuited = 0; // count of shops where incremental exit fired
   const errors = [];
+
+  // Pre-load known reviews for the target shops in one query. Empty map
+  // if fullResync=true (we skip the optimization entirely so all pages
+  // walk to the end — catches deletions and edits on rows Google may
+  // have removed since our last sync).
+  const knownReviews = fullResync
+    ? new Map()
+    : await getKnownReviewsForShops(eligible.map((s) => s.gbp_location_id));
 
   for (const shop of eligible) {
     let allReviewsForShop = [];
     let pageToken = null;
     let pageCount = 0;
+    let hitKnown = false;
     try {
       while (pageCount < MAX_PAGES_PER_SHOP) {
         const page = await listReviews({
@@ -106,6 +129,17 @@ export async function POST(request) {
         const pageReviews = Array.isArray(page.reviews) ? page.reviews : [];
 
         for (const rev of pageReviews) {
+          // Incremental short-circuit: Google returns reviews ordered by
+          // updateTime desc. First review we see that we already have
+          // (same review_name) AND whose updateTime hasn't advanced —
+          // everything past this point is unchanged. Stop paginating.
+          if (!fullResync) {
+            const known = knownReviews.get(rev.name);
+            if (known && known.google_updated_at && rev.updateTime === new Date(known.google_updated_at).toISOString()) {
+              hitKnown = true;
+              break;
+            }
+          }
           allReviewsForShop.push({
             review_name: rev.name,
             shop_id: shop.shop_id,
@@ -123,6 +157,7 @@ export async function POST(request) {
           });
         }
 
+        if (hitKnown) break;
         pageCount++;
         pageToken = page.nextPageToken || null;
         if (!pageToken) break;
@@ -133,6 +168,7 @@ export async function POST(request) {
       reviewsFetched += allReviewsForShop.length;
       inserted += res.inserted;
       shopsProcessed++;
+      if (hitKnown) shortCircuited++;
     } catch (e) {
       shopsSkipped++;
       const message = e.message || "Unknown";
@@ -148,16 +184,18 @@ export async function POST(request) {
     action: "Synced GBP reviews",
     location: "",
     brand: brand || "all",
-    details: `shops:${shopsProcessed}/${eligible.length} reviews:${reviewsFetched} inserted:${inserted}`,
+    details: `shops:${shopsProcessed}/${eligible.length} reviews:${reviewsFetched} inserted:${inserted} shortCircuited:${shortCircuited}${fullResync ? " (full resync)" : ""}`,
   }).catch(() => {});
 
   return NextResponse.json({
     brand: brand || "*",
     shopsProcessed,
     shopsSkipped,
+    shortCircuited,
     reviewsFetched,
     inserted,
     updated: 0,
+    fullResync,
     errors: errors.length > 0 ? errors : undefined,
   });
 }
