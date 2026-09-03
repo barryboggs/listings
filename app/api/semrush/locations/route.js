@@ -97,12 +97,27 @@ export async function GET(request) {
  */
 function mergeShopNumbers(locations, shopMap) {
   const allShops = shopMap.all || [];
+  const byShopId = shopMap.byShopId || new Map();
+
+  // Also attach gbpLocationId (and account) from the matched shop row
+  // when we find a match — clients like the map-markers page use this
+  // to build deep-links into the GBP dashboard without a second query.
+  // Same for shop-owned coordinates (populated via CSV import) so the
+  // page can indicate "DB coords available" without another round-trip.
+  const attachGbp = (loc, shopRow) => {
+    if (!shopRow) return;
+    if (shopRow.gbp_location_id) loc.gbpLocationId = shopRow.gbp_location_id;
+    if (shopRow.gbp_account_id) loc.gbpAccountId = shopRow.gbp_account_id;
+    if (typeof shopRow.latitude === "number") loc.shopLatitude = shopRow.latitude;
+    if (typeof shopRow.longitude === "number") loc.shopLongitude = shopRow.longitude;
+  };
 
   for (const loc of locations) {
     // Primary: matched by new-API ID
     const byNewId = shopMap.byNewSemrushId?.get(loc.id);
     if (byNewId) {
       loc.shopId = byNewId.shop_id;
+      attachGbp(loc, byNewId);
       continue;
     }
 
@@ -112,6 +127,7 @@ function mergeShopNumbers(locations, shopMap) {
     const byOldId = shopMap.bySemrushId?.get(loc.id);
     if (byOldId) {
       loc.shopId = byOldId.shop_id;
+      attachGbp(loc, byOldId);
       continue;
     }
 
@@ -122,6 +138,7 @@ function mergeShopNumbers(locations, shopMap) {
       for (const s of allShops) {
         if (s.shop_id && url.includes(s.shop_id.toLowerCase())) {
           loc.shopId = s.shop_id;
+          attachGbp(loc, s);
           found = true;
           break;
         }
@@ -136,6 +153,7 @@ function mergeShopNumbers(locations, shopMap) {
         const shopPhone = (s.phone || "").replace(/[^0-9]/g, "").slice(-10);
         if (shopPhone.length >= 10 && shopPhone === locPhone) {
           loc.shopId = s.shop_id;
+          attachGbp(loc, s);
           break;
         }
       }
