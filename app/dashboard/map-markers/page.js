@@ -67,7 +67,6 @@ export default function MapMarkersPage() {
 
   const showToast = (msg, isError) => {
     setToast({ msg, isError });
-    setTimeout(() => setToast(null), 5000);
   };
 
   const isAdmin = currentUser?.role === "admin";
@@ -286,12 +285,13 @@ export default function MapMarkersPage() {
   return (
     <>
       {toast && (
-        <div className="fixed top-6 right-6 z-50 px-4 py-3 rounded-lg text-sm font-medium max-w-md" style={{
+        <div className="fixed top-6 right-6 z-50 px-4 py-3 rounded-lg text-sm font-medium max-w-md flex items-start gap-3" style={{
           background: toast.isError ? "#2d0a0a" : "#0d2818",
           border: `1px solid ${toast.isError ? "#5c1a1a" : "#2d5a2d"}`,
           color: toast.isError ? "#f87171" : "#34d399",
         }}>
-          {toast.msg}
+          <span className="flex-1">{toast.msg}</span>
+          <button onClick={() => setToast(null)} aria-label="Dismiss" className="flex-shrink-0 opacity-60 hover:opacity-100" style={{ background: "transparent", border: "none", color: "inherit", cursor: "pointer", fontSize: "1rem", lineHeight: 1 }}>×</button>
         </div>
       )}
 

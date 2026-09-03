@@ -28,9 +28,10 @@ export default function ShopsPage() {
   const [assignedIds, setAssignedIds] = useState(new Set()); // locations assigned this session
   const [assignBusy, setAssignBusy] = useState(null); // location id currently saving
 
+  // Persistent toast — dismissed by the × button. Auto-dismiss risks
+  // users missing outcomes when they step away during long imports.
   const showToast = (msg, isError) => {
     setToast({ msg, isError });
-    setTimeout(() => setToast(null), 5000);
   };
 
   const fetchShops = () => {
@@ -300,8 +301,10 @@ export default function ShopsPage() {
   return (
     <>
       {toast && (
-        <div className="fixed bottom-6 right-6 z-[60] animate-slide-up px-5 py-3 rounded-lg text-sm font-medium flex items-center gap-2" style={{ background: toast.isError ? "#2d0a0a" : "#1a2e1a", border: `1px solid ${toast.isError ? "#5c1a1a" : "#2d5a2d"}`, color: toast.isError ? "#f87171" : "#6ee7b7" }}>
-          <span>{toast.isError ? "✗" : "✓"}</span> {toast.msg}
+        <div className="fixed bottom-6 right-6 z-[60] animate-slide-up px-5 py-3 rounded-lg text-sm font-medium flex items-start gap-3 max-w-lg" style={{ background: toast.isError ? "#2d0a0a" : "#1a2e1a", border: `1px solid ${toast.isError ? "#5c1a1a" : "#2d5a2d"}`, color: toast.isError ? "#f87171" : "#6ee7b7" }}>
+          <span className="flex-shrink-0 mt-0.5">{toast.isError ? "✗" : "✓"}</span>
+          <span className="flex-1">{toast.msg}</span>
+          <button onClick={() => setToast(null)} aria-label="Dismiss" className="flex-shrink-0 opacity-60 hover:opacity-100" style={{ background: "transparent", border: "none", color: "inherit", cursor: "pointer", fontSize: "1rem", lineHeight: 1 }}>×</button>
         </div>
       )}
 
