@@ -36,9 +36,12 @@ export default function HolidayImportPage() {
       .catch(() => {});
   }, []);
 
+  // Toasts on this page carry the outcome of long-running actions
+  // (CSV parse, batched push) — auto-dismiss risks the user missing
+  // a failure they were away from the screen for. Persistent until
+  // manually closed via the × button in the toast.
   const showToast = (msg, isError) => {
     setToast({ msg, isError });
-    setTimeout(() => setToast(null), 5000);
   };
 
   // Shops in the picked brand that carry a shop number (Franchise ID).
@@ -101,14 +104,44 @@ export default function HolidayImportPage() {
       const locRes = await fetch("/api/semrush/locations");
       const locData = await locRes.json();
 
+      // Trim to just the fields the server + push route actually use.
+      // The full locations array (~2KB × 5000 shops = ~10MB) exceeds
+      // Vercel's 4.5MB body limit, which returns an HTML error page
+      // and makes the client's res.json() fail with "JSON error line 1".
+      // These 7 fields are the entire consumed surface downstream.
+      const trimmedLocations = (locData.locations || []).map((l) => ({
+        id: l.id,
+        shopId: l.shopId,
+        name: l.name,
+        city: l.city,
+        state: l.state,
+        brand: l.brand,
+        businessHours: l.businessHours,
+      }));
+
       // Parse and preview (no pushing)
       const res = await fetch("/api/holiday-import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ csvData, locations: locData.locations || [] }),
+        body: JSON.stringify({ csvData, locations: trimmedLocations }),
       });
 
-      const result = await res.json();
+      // Guard against non-JSON responses (e.g. Vercel's HTML error page
+      // when the request body exceeds the 4.5MB platform limit). Reading
+      // as text first + parsing manually gives a clearer error than
+      // "Unexpected token '<' at line 1".
+      const rawText = await res.text();
+      let result;
+      try {
+        result = JSON.parse(rawText);
+      } catch {
+        showToast(
+          `Server returned non-JSON (HTTP ${res.status}). This usually means the request body was too large. Preview of response: ${rawText.slice(0, 100)}`,
+          true
+        );
+        setLoading(false);
+        return;
+      }
       if (res.ok) {
         setPreview(result);
       } else {
@@ -238,8 +271,17 @@ export default function HolidayImportPage() {
   return (
     <>
       {toast && (
-        <div className="fixed bottom-6 right-6 z-[60] animate-slide-up px-5 py-3 rounded-lg text-sm font-medium flex items-center gap-2" style={{ background: toast.isError ? "#2d0a0a" : "#1a2e1a", border: `1px solid ${toast.isError ? "#5c1a1a" : "#2d5a2d"}`, color: toast.isError ? "#f87171" : "#6ee7b7" }}>
-          <span>{toast.isError ? "✗" : "✓"}</span> {toast.msg}
+        <div className="fixed bottom-6 right-6 z-[60] animate-slide-up px-5 py-3 rounded-lg text-sm font-medium flex items-start gap-3 max-w-lg" style={{ background: toast.isError ? "#2d0a0a" : "#1a2e1a", border: `1px solid ${toast.isError ? "#5c1a1a" : "#2d5a2d"}`, color: toast.isError ? "#f87171" : "#6ee7b7" }}>
+          <span className="flex-shrink-0 mt-0.5">{toast.isError ? "✗" : "✓"}</span>
+          <span className="flex-1">{toast.msg}</span>
+          <button
+            onClick={() => setToast(null)}
+            aria-label="Dismiss"
+            className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity"
+            style={{ background: "transparent", border: "none", color: "inherit", cursor: "pointer", fontSize: "1rem", lineHeight: 1, marginLeft: "0.25rem" }}
+          >
+            ×
+          </button>
         </div>
       )}
 

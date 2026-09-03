@@ -49,7 +49,6 @@ export default function ActivityPage() {
       if (res.ok) {
         fetchActivity();
         setToast("Activity log cleared");
-        setTimeout(() => setToast(null), 3000);
       }
     } catch {}
     setClearing(false);
@@ -77,8 +76,10 @@ export default function ActivityPage() {
   return (
     <>
       {toast && (
-        <div className="fixed bottom-6 right-6 z-[60] animate-slide-up px-5 py-3 rounded-lg text-sm font-medium flex items-center gap-2" style={{ background: "#1a2e1a", border: "1px solid #2d5a2d", color: "#6ee7b7" }}>
-          <span>✓</span> {toast}
+        <div className="fixed bottom-6 right-6 z-[60] animate-slide-up px-5 py-3 rounded-lg text-sm font-medium flex items-start gap-3 max-w-lg" style={{ background: "#1a2e1a", border: "1px solid #2d5a2d", color: "#6ee7b7" }}>
+          <span className="flex-shrink-0 mt-0.5">✓</span>
+          <span className="flex-1">{toast}</span>
+          <button onClick={() => setToast(null)} aria-label="Dismiss" className="flex-shrink-0 opacity-60 hover:opacity-100" style={{ background: "transparent", border: "none", color: "inherit", cursor: "pointer", fontSize: "1rem", lineHeight: 1 }}>×</button>
         </div>
       )}
 
