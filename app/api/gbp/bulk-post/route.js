@@ -244,7 +244,10 @@ export async function POST(request) {
       const message = err.message || "Unknown error";
       await resolveGbpPostPush(auditId, { state: "FAILED", error: message });
       results.push({ shopId: shop.shop_id, state: "FAILED", error: message });
-      if (errors.length < 20) errors.push({ shopId: shop.shop_id, error: message });
+      // Higher cap than before — a whole chunk's worth of failures
+      // needs to make it back to the client so the retry list is
+      // complete. Response body isn't cost-sensitive at this scale.
+      if (errors.length < 500) errors.push({ shopId: shop.shop_id, error: message });
     }
 
     // Throttle between shops — skip the wait after the last one.
