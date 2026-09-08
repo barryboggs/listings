@@ -353,9 +353,13 @@ export default function GbpPostsPage() {
     return post;
   };
 
-  const runPush = async () => {
+  // `overrideShopIds` — used by the "Retry failed" button to re-run
+  // the push against just the shops that failed on the previous run,
+  // reusing the currently-composed post payload. When omitted, uses
+  // the checkbox selection (the normal Post-to-N-shops flow).
+  const runPush = async (overrideShopIds = null) => {
     setConfirmOpen(false);
-    if (validationError) {
+    if (validationError && !overrideShopIds) {
       showToast(validationError, true);
       return;
     }
@@ -364,7 +368,9 @@ export default function GbpPostsPage() {
     cancelRef.current = false;
 
     const batchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const shopIdList = selectedShops.map((s) => s.shop_id);
+    const shopIdList = overrideShopIds && overrideShopIds.length > 0
+      ? overrideShopIds
+      : selectedShops.map((s) => s.shop_id);
     const chunks = chunkArray(shopIdList, BATCH_SIZE);
     const totalBatches = chunks.length;
     const totalEligible = shopIdList.length;
@@ -373,15 +379,17 @@ export default function GbpPostsPage() {
     let totalFailed = 0;
     let totalRejected = 0;
     let totalSkipped = 0;
-    const errors = [];
-
+    // Every non-success outcome, unbounded — the previous 40-cap
+    // silently dropped failures on large brands (AGN hit ~90 failed
+    // with only 40 surfaced). Includes both FAILED and REJECTED so
+    // admin can see the full picture; only FAILED entries are retryable.
     const postPayload = buildPostPayload();
 
     for (let i = 0; i < chunks.length; i++) {
       if (cancelRef.current) {
         setBatchProgress({
           phase: "cancelled", batch: i, totalBatches, totalEligible,
-          totalSucceeded, totalFailed, totalRejected, totalSkipped, errors,
+          totalSucceeded, totalFailed, totalRejected, totalSkipped, failures: [...failures],
         });
         break;
       }
@@ -389,7 +397,7 @@ export default function GbpPostsPage() {
       if (i > 0) {
         setBatchProgress({
           phase: "waiting", batch: i + 1, totalBatches, totalEligible,
-          totalSucceeded, totalFailed, totalRejected, totalSkipped, errors,
+          totalSucceeded, totalFailed, totalRejected, totalSkipped, failures: [...failures],
         });
         // Poll cancelRef during the sleep so a cancel click doesn't
         // have to wait a full 8s to take effect.
@@ -403,7 +411,7 @@ export default function GbpPostsPage() {
 
       setBatchProgress({
         phase: "sending", batch: i + 1, totalBatches, totalEligible,
-        totalSucceeded, totalFailed, totalRejected, totalSkipped, errors,
+        totalSucceeded, totalFailed, totalRejected, totalSkipped, failures: [...failures],
       });
 
       try {
@@ -424,26 +432,41 @@ export default function GbpPostsPage() {
           totalFailed += data.failed || 0;
           totalRejected += data.rejected || 0;
           totalSkipped += data.skipped || 0;
-          if (Array.isArray(data.errors)) {
-            for (const e of data.errors) {
-              if (errors.length >= 40) break;
-              errors.push(e);
+          // Walk the full per-shop results array so nothing gets
+          // silently dropped — we specifically capture FAILED and
+          // REJECTED with their shop_id + error so the retry list
+          // (and audit panel) has the complete picture.
+          if (Array.isArray(data.results)) {
+            for (const r of data.results) {
+              if (r.state === "FAILED" || r.state === "REJECTED") {
+                failures.push({
+                  shopId: r.shopId,
+                  state: r.state,
+                  error: r.error?.message || r.error || (r.state === "REJECTED" ? "Google's automated review rejected the post content" : "Unknown error"),
+                });
+              }
             }
           }
         } else {
+          // Whole chunk failed at the transport level — mark every
+          // shop in the chunk as failed so retry re-tries all of them.
           totalFailed += chunks[i].length;
-          if (errors.length < 40) errors.push({ shopId: "batch", error: data.error || `HTTP ${res.status}` });
+          for (const sid of chunks[i]) {
+            failures.push({ shopId: sid, state: "FAILED", error: data.error || `HTTP ${res.status}` });
+          }
         }
       } catch (e) {
         totalFailed += chunks[i].length;
-        if (errors.length < 40) errors.push({ shopId: "batch", error: e.message });
+        for (const sid of chunks[i]) {
+          failures.push({ shopId: sid, state: "FAILED", error: e.message });
+        }
       }
     }
 
     setBatchProgress({
       phase: cancelRef.current ? "cancelled" : "done",
       batch: chunks.length, totalBatches, totalEligible,
-      totalSucceeded, totalFailed, totalRejected, totalSkipped, errors,
+      totalSucceeded, totalFailed, totalRejected, totalSkipped, failures,
     });
     setPushing(false);
     setStopping(false);
@@ -1041,15 +1064,13 @@ export default function GbpPostsPage() {
                   <StatCard label="Rejected" value={batchProgress.totalRejected} color={batchProgress.totalRejected > 0 ? "#fbbf24" : "#e8e8e8"} />
                   <StatCard label="Skipped" value={batchProgress.totalSkipped} color={batchProgress.totalSkipped > 0 ? "#fbbf24" : "#e8e8e8"} />
                 </div>
-                {batchProgress.errors && batchProgress.errors.length > 0 && (
-                  <div className="mt-3 p-3 rounded max-h-64 overflow-y-auto" style={{ background: "#2d0a0a20", border: "1px solid #5c1a1a40" }}>
-                    <div className="text-[11px] font-semibold mb-1" style={{ color: "#f87171" }}>Errors ({batchProgress.errors.length}):</div>
-                    {batchProgress.errors.map((e, i) => (
-                      <div key={i} className="text-[10px] font-mono leading-snug" style={{ color: "#f8717199" }}>
-                        <span style={{ color: "#f87171" }}>{safeRenderable(e.shopId)}:</span> {safeRenderable(e.error)}
-                      </div>
-                    ))}
-                  </div>
+                {batchProgress.failures && batchProgress.failures.length > 0 && (
+                  <FailurePanel
+                    failures={batchProgress.failures}
+                    brandLocations={brandLocations}
+                    pushing={pushing}
+                    onRetry={(retryShopIds) => runPush(retryShopIds)}
+                  />
                 )}
               </div>
             )}
@@ -1160,6 +1181,88 @@ function StatCard({ label, value, color }) {
     <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
       <div style={{ color: "#888" }}>{label}</div>
       <div className="text-base font-bold" style={{ color: color || "#e8e8e8" }}>{value}</div>
+    </div>
+  );
+}
+
+/**
+ * Failure detail panel — shown when a bulk-post run finishes with any
+ * FAILED or REJECTED shops. Joins each failure to the shop's row in
+ * `brandLocations` so we can show the shop name / city / state (not
+ * just a bare shop_id). Splits FAILED (retryable — transient errors)
+ * from REJECTED (Google auto-review, retrying with the same content
+ * gets the same rejection, so no retry button for those).
+ */
+function FailurePanel({ failures, brandLocations, pushing, onRetry }) {
+  const shopById = new Map((brandLocations || []).map((s) => [s.shop_id, s]));
+  const failed = failures.filter((f) => f.state === "FAILED");
+  const rejected = failures.filter((f) => f.state === "REJECTED");
+  const failedIds = failed.map((f) => f.shopId);
+
+  return (
+    <div className="mt-3 space-y-3">
+      {failed.length > 0 && (
+        <div className="p-3 rounded" style={{ background: "#2d0a0a20", border: "1px solid #5c1a1a40" }}>
+          <div className="flex justify-between items-center mb-2">
+            <div className="text-[11px] font-semibold" style={{ color: "#f87171" }}>
+              Failed shops ({failed.length}) — retryable
+            </div>
+            {onRetry && (
+              <button
+                onClick={() => onRetry(failedIds)}
+                disabled={pushing}
+                className="px-3 py-1 rounded text-[11px] font-semibold text-white"
+                style={{ background: pushing ? "#333" : "#0ea5e9", opacity: pushing ? 0.5 : 1 }}
+                title="Re-run the current post against just the failed shops"
+              >
+                {pushing ? "Posting…" : `Retry ${failed.length} failed`}
+              </button>
+            )}
+          </div>
+          <div className="max-h-56 overflow-y-auto space-y-0.5">
+            {failed.map((f, i) => {
+              const shop = shopById.get(f.shopId);
+              return (
+                <div key={i} className="text-[10px] leading-snug grid grid-cols-12 gap-2" style={{ color: "#f8717199" }}>
+                  <div className="col-span-1 font-mono" style={{ color: "#f87171" }}>{safeRenderable(f.shopId)}</div>
+                  <div className="col-span-4 truncate" style={{ color: "#f87171cc" }}>
+                    {shop ? `${shop.name}` : "—"}
+                  </div>
+                  <div className="col-span-2 truncate" style={{ color: "#f87171aa" }}>
+                    {shop ? `${shop.city}, ${shop.state}` : ""}
+                  </div>
+                  <div className="col-span-5 font-mono truncate" title={String(f.error || "")}>
+                    {safeRenderable(f.error)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {rejected.length > 0 && (
+        <div className="p-3 rounded" style={{ background: "#2d1b0020", border: "1px solid #5c3a0040" }}>
+          <div className="text-[11px] font-semibold mb-2" style={{ color: "#fbbf24" }}>
+            Rejected by Google ({rejected.length}) — content flagged; retrying with the same content won't help
+          </div>
+          <div className="max-h-40 overflow-y-auto space-y-0.5">
+            {rejected.map((r, i) => {
+              const shop = shopById.get(r.shopId);
+              return (
+                <div key={i} className="text-[10px] leading-snug grid grid-cols-12 gap-2" style={{ color: "#fbbf2499" }}>
+                  <div className="col-span-1 font-mono" style={{ color: "#fbbf24" }}>{safeRenderable(r.shopId)}</div>
+                  <div className="col-span-4 truncate" style={{ color: "#fbbf24cc" }}>
+                    {shop ? shop.name : "—"}
+                  </div>
+                  <div className="col-span-7 truncate" style={{ color: "#fbbf24aa" }}>
+                    {shop ? `${shop.city}, ${shop.state}` : ""}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
