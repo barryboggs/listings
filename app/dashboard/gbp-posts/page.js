@@ -113,6 +113,12 @@ export default function GbpPostsPage() {
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
 
+  // Per-batch verification state. Keyed by batch_id. Values:
+  //   { verifying: bool, verified, missing, errored, results: [...] }
+  // Set when admin clicks Verify on a history row; the panel below
+  // that row expands to show the outcome.
+  const [verifyByBatch, setVerifyByBatch] = useState({});
+
   const [toast, setToast] = useState(null);
 
   const showToast = (msg, isError) => {
@@ -485,6 +491,105 @@ export default function GbpPostsPage() {
   const requestStop = () => {
     cancelRef.current = true;
     setStopping(true);
+  };
+
+  // Verify a batch: for each SUCCESS/REJECTED row in the batch, check
+  // whether the post name is actually present on the shop's GBP profile.
+  // Chunks 30 shops per server call so each call fits under Vercel's
+  // function timeout. Aggregates results into verifyByBatch keyed by
+  // batchId so the history panel can render the outcome inline.
+  // Chunk-loop through however many shops the batch has. First call
+  // sends just batchId; server returns first 50 results + remainingShopIds
+  // for the rest. Subsequent calls send remainingShopIds. Loop exits
+  // when remainingShopIds is empty. Live progress updates after each
+  // chunk so admin sees the panel filling in for large batches.
+  const runVerify = async (batchId) => {
+    if (!batchId) return;
+
+    setVerifyByBatch((s) => ({
+      ...s,
+      [batchId]: { verifying: true, verified: 0, missing: 0, errored: 0, total: 0, results: [] },
+    }));
+
+    let totalVerified = 0;
+    let totalMissing = 0;
+    let totalErrored = 0;
+    const combinedResults = [];
+    let nextShopIds = null; // null = first call, [] = done, [ids] = continue
+    let firstNote = undefined;
+
+    try {
+      while (true) {
+        const body = nextShopIds === null ? { batchId } : { batchId, shopIds: nextShopIds };
+        const res = await fetch("/api/gbp/verify-batch-posts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setVerifyByBatch((s) => ({
+            ...s,
+            [batchId]: { verifying: false, error: data.error || `HTTP ${res.status}` },
+          }));
+          showToast(data.error || "Verify failed", true);
+          return;
+        }
+
+        totalVerified += data.verified || 0;
+        totalMissing += data.missing || 0;
+        totalErrored += data.errored || 0;
+        if (Array.isArray(data.results)) combinedResults.push(...data.results);
+        if (data.note && firstNote === undefined) firstNote = data.note;
+
+        // Live update as chunks complete
+        setVerifyByBatch((s) => ({
+          ...s,
+          [batchId]: {
+            verifying: (data.remainingShopIds || []).length > 0,
+            verified: totalVerified,
+            missing: totalMissing,
+            errored: totalErrored,
+            total: combinedResults.length,
+            results: [...combinedResults],
+            note: firstNote,
+          },
+        }));
+
+        nextShopIds = Array.isArray(data.remainingShopIds) ? data.remainingShopIds : [];
+        if (nextShopIds.length === 0) break;
+        // Small breather between chunks so the browser can paint the
+        // updated state before the next call blocks.
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      showToast(
+        `Verified batch — ${totalVerified} present · ${totalMissing} missing on GBP · ${totalErrored} errored`
+      );
+    } catch (e) {
+      setVerifyByBatch((s) => ({
+        ...s,
+        [batchId]: { verifying: false, error: e.message },
+      }));
+      showToast(e.message, true);
+    }
+  };
+
+  // Retry a batch's missing shops via the normal runPush flow. Reuses
+  // the currently-composed post payload; if admin has edited fields
+  // since the original push, the retry uses the NEW content (matches
+  // the mental model of "post whatever's in the composer right now").
+  const retryMissingFromVerify = (batchId) => {
+    const v = verifyByBatch[batchId];
+    if (!v || !Array.isArray(v.results)) return;
+    const missingShopIds = v.results
+      .filter((r) => r.state === "MISSING")
+      .map((r) => r.shopId);
+    if (missingShopIds.length === 0) {
+      showToast("No missing shops to retry", true);
+      return;
+    }
+    runPush(missingShopIds);
   };
 
   // --- Render ---
@@ -1106,8 +1211,10 @@ export default function GbpPostsPage() {
               const endDate = isOffer && h.offer_end_date ? String(h.offer_end_date).slice(0, 10) : null;
               const today = new Date().toISOString().slice(0, 10);
               const expired = endDate && endDate < today;
+              const verify = verifyByBatch[h.batch_id];
               return (
-                <div key={h.batch_id} className="grid grid-cols-12 gap-2 text-xs py-2 px-3 rounded items-center" style={{ background: "#0c0c0e", border: "1px solid #1a1a1d" }}>
+                <div key={h.batch_id}>
+                <div className="grid grid-cols-12 gap-2 text-xs py-2 px-3 rounded items-center" style={{ background: "#0c0c0e", border: "1px solid #1a1a1d" }}>
                   <div className="col-span-3">
                     <div className="font-semibold" style={{ color: cfg.color }}>{cfg.name}</div>
                     <div className="text-[10px]" style={{ color: "#555" }}>{new Date(h.pushed_at).toLocaleString()}</div>
@@ -1128,13 +1235,92 @@ export default function GbpPostsPage() {
                       </span>
                     )}
                   </div>
-                  <div className="col-span-3 text-right text-[10px]">
-                    <span style={{ color: "#34d399" }}>{h.succeeded}✓</span>
-                    {h.failed > 0 && <span style={{ color: "#f87171" }}> · {h.failed}✗</span>}
-                    {h.rejected > 0 && <span style={{ color: "#fbbf24" }}> · {h.rejected}⚠</span>}
-                    {(h.auto_deleted || 0) > 0 && <span style={{ color: "#93c5fd" }}> · {h.auto_deleted}🗑</span>}
-                    <span style={{ color: "#555" }}> / {h.total}</span>
+                  <div className="col-span-3 text-right text-[10px] flex items-center justify-end gap-2">
+                    <div>
+                      <span style={{ color: "#34d399" }}>{h.succeeded}✓</span>
+                      {h.failed > 0 && <span style={{ color: "#f87171" }}> · {h.failed}✗</span>}
+                      {h.rejected > 0 && <span style={{ color: "#fbbf24" }}> · {h.rejected}⚠</span>}
+                      {(h.auto_deleted || 0) > 0 && <span style={{ color: "#93c5fd" }}> · {h.auto_deleted}🗑</span>}
+                      <span style={{ color: "#555" }}> / {h.total}</span>
+                    </div>
+                    <button
+                      onClick={() => runVerify(h.batch_id)}
+                      disabled={verify?.verifying || pushing}
+                      className="px-2 py-1 rounded text-[10px] font-semibold flex-shrink-0"
+                      style={{
+                        background: "#1c1c1f",
+                        border: "1px solid #2a2a2e",
+                        color: verify?.verifying ? "#555" : "#93c5fd",
+                        opacity: verify?.verifying || pushing ? 0.5 : 1,
+                      }}
+                      title="Cross-check each shop's GBP profile to confirm the post is actually there"
+                    >
+                      {verify?.verifying ? "Verifying…" : "Verify"}
+                    </button>
                   </div>
+                </div>
+                {verify && !verify.verifying && (verify.results || verify.error) && (
+                  <div className="mt-1 p-3 rounded text-[11px]" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
+                    {verify.error ? (
+                      <div style={{ color: "#f87171" }}>Verify failed: {verify.error}</div>
+                    ) : (
+                      <>
+                        <div className="flex justify-between items-center mb-2">
+                          <div style={{ color: "#aaa" }}>
+                            <span style={{ color: "#34d399" }}>{verify.verified} present on GBP</span>
+                            {verify.missing > 0 && <span style={{ color: "#f87171" }}> · {verify.missing} missing</span>}
+                            {verify.errored > 0 && <span style={{ color: "#fbbf24" }}> · {verify.errored} errored</span>}
+                            <span style={{ color: "#555" }}> / {verify.total} checked</span>
+                          </div>
+                          {verify.missing > 0 && (
+                            <button
+                              onClick={() => retryMissingFromVerify(h.batch_id)}
+                              disabled={pushing}
+                              className="px-3 py-1 rounded text-[10px] font-semibold text-white"
+                              style={{ background: pushing ? "#333" : "#0ea5e9", opacity: pushing ? 0.5 : 1 }}
+                              title="Re-run the CURRENT composed post against just the shops missing this post on GBP"
+                            >
+                              {pushing ? "Posting…" : `Retry ${verify.missing} missing`}
+                            </button>
+                          )}
+                        </div>
+                        {verify.note && (
+                          <div className="text-[10px] mb-2" style={{ color: "#666" }}>{verify.note}</div>
+                        )}
+                        {verify.missing > 0 && (
+                          <details style={{ color: "#aaa" }}>
+                            <summary className="cursor-pointer text-[10px]" style={{ color: "#93c5fd" }}>Show missing shops</summary>
+                            <div className="mt-2 max-h-48 overflow-y-auto space-y-0.5">
+                              {verify.results.filter((r) => r.state === "MISSING").map((r, i) => {
+                                const shop = shops.find((s) => s.shop_id === r.shopId);
+                                return (
+                                  <div key={i} className="text-[10px] grid grid-cols-12 gap-2" style={{ color: "#f8717199" }}>
+                                    <div className="col-span-1 font-mono" style={{ color: "#f87171" }}>{r.shopId}</div>
+                                    <div className="col-span-4 truncate">{shop ? shop.name : "—"}</div>
+                                    <div className="col-span-4 truncate">{shop ? `${shop.city}, ${shop.state}` : ""}</div>
+                                    <div className="col-span-3 text-right">{r.error || "not on GBP"}</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+                        )}
+                        {verify.errored > 0 && (
+                          <details className="mt-2" style={{ color: "#aaa" }}>
+                            <summary className="cursor-pointer text-[10px]" style={{ color: "#fbbf24" }}>Show errored checks</summary>
+                            <div className="mt-2 max-h-32 overflow-y-auto space-y-0.5">
+                              {verify.results.filter((r) => r.state === "ERROR").map((r, i) => (
+                                <div key={i} className="text-[10px] font-mono" style={{ color: "#fbbf2499" }}>
+                                  {r.shopId}: {r.error}
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
                 </div>
               );
             })}
