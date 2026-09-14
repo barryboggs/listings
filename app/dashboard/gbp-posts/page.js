@@ -389,6 +389,8 @@ export default function GbpPostsPage() {
     // silently dropped failures on large brands (AGN hit ~90 failed
     // with only 40 surfaced). Includes both FAILED and REJECTED so
     // admin can see the full picture; only FAILED entries are retryable.
+    const failures = [];
+
     const postPayload = buildPostPayload();
 
     for (let i = 0; i < chunks.length; i++) {
