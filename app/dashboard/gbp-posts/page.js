@@ -247,6 +247,32 @@ export default function GbpPostsPage() {
 
   // --- Image upload (reuse the same endpoint as listings-photos) ---
 
+  // Guard against non-http(s) URLs ending up in mediaUrl. This
+  // specifically prevents `file:///` values (e.g. from a user dragging
+  // a file into the URL input by accident) from reaching the <img> tag
+  // where Firefox's file:// security policy would kill the whole page
+  // render. Blobs from our own upload endpoint pass through unchanged.
+  // Also handles `blob:` URLs from FileReader that would break on push
+  // (Google's API can't fetch a blob URL scoped to your browser tab).
+  const setSafeMediaUrl = (raw) => {
+    const v = (raw || "").trim();
+    if (v === "") {
+      setMediaUrl("");
+      setUploadError(null);
+      return;
+    }
+    if (/^file:/i.test(v) || /^blob:/i.test(v) || /^javascript:/i.test(v) || /^data:/i.test(v)) {
+      setMediaUrl("");
+      setUploadError(
+        "That's a local-file URL — Google can't fetch it. Drop the file into the upload zone above (it'll upload to our storage and produce a proper https URL), or paste an https URL to an already-hosted image."
+      );
+      return;
+    }
+    // Everything else — trust the user (Google will reject non-image URLs anyway).
+    setMediaUrl(v);
+    setUploadError(null);
+  };
+
   const handleFileUpload = async (file) => {
     if (!file) return;
     setUploadingFile(true);
@@ -725,7 +751,14 @@ export default function GbpPostsPage() {
               </label>
               {mediaUrl ? (
                 <div className="flex items-center gap-3 p-3 rounded-md" style={{ background: "#0c0c0e", border: "1px solid #2a2a2e" }}>
-                  <img src={mediaUrl} alt="Preview" className="w-16 h-16 object-cover rounded" style={{ border: "1px solid #2a2a2e" }} />
+                  {/* Belt-and-suspenders: only render the img if the URL
+                      is unambiguously safe. setSafeMediaUrl blocks bad
+                      values at set time, but this guard means a stale
+                      state or future setter that bypasses validation
+                      can't crash the whole page. */}
+                  {/^https?:\/\//i.test(mediaUrl) && (
+                    <img src={mediaUrl} alt="Preview" className="w-16 h-16 object-cover rounded" style={{ border: "1px solid #2a2a2e" }} onError={(e) => { e.target.style.display = "none"; }} />
+                  )}
                   <div className="flex-1 text-xs" style={{ color: "#aaa" }}>
                     <div className="font-mono text-[10px] truncate" style={{ color: "#888" }}>{mediaUrl}</div>
                     {uploadMeta && uploadMeta.wasResized && (
@@ -767,7 +800,19 @@ export default function GbpPostsPage() {
                 <input
                   type="url"
                   value={mediaUrl}
-                  onChange={(e) => { setMediaUrl(e.target.value); setUploadMeta(null); }}
+                  onChange={(e) => { setSafeMediaUrl(e.target.value); setUploadMeta(null); }}
+                  onDrop={(e) => {
+                    // If a user drags a file over the URL input, browsers
+                    // put a file:/// value into the input by default —
+                    // which would render as <img src="file:///..."> and
+                    // trigger the security-error render crash. Intercept
+                    // and reroute to the actual upload flow instead.
+                    const f = e.dataTransfer?.files?.[0];
+                    if (f) {
+                      e.preventDefault();
+                      handleFileUpload(f);
+                    }
+                  }}
                   placeholder="https://…"
                   className="ml-1 px-2 py-1 rounded text-xs w-96 max-w-full"
                   style={{ background: "#0c0c0e", border: "1px solid #2a2a2e", color: "#e8e8e8" }}
