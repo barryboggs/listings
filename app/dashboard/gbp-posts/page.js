@@ -119,6 +119,17 @@ export default function GbpPostsPage() {
   // that row expands to show the outcome.
   const [verifyByBatch, setVerifyByBatch] = useState({});
 
+  // Link-update modal state — set when admin clicks "Update link" on a
+  // history row. `linkEditBatch` is the batch object being edited.
+  // Modal closes when set to null.
+  const [linkEditBatch, setLinkEditBatch] = useState(null);
+  const [linkEditUrl, setLinkEditUrl] = useState("");
+  const [linkEditUseShopWebsite, setLinkEditUseShopWebsite] = useState(false);
+  const [linkEditUtm, setLinkEditUtm] = useState("");
+  const [linkEditRunning, setLinkEditRunning] = useState(false);
+  // Per-batch outcome of the most recent link update, keyed by batch_id.
+  const [linkResultByBatch, setLinkResultByBatch] = useState({});
+
   const [toast, setToast] = useState(null);
 
   const showToast = (msg, isError) => {
@@ -618,6 +629,108 @@ export default function GbpPostsPage() {
       return;
     }
     runPush(missingShopIds);
+  };
+
+  // Open the link-editor modal for a specific batch. Prefills the
+  // form with sensible defaults based on the batch's topic_type.
+  const openLinkEditor = (batch) => {
+    setLinkEditBatch(batch);
+    setLinkEditUrl("");
+    setLinkEditUseShopWebsite(false);
+    setLinkEditUtm(batch.topic_type === "OFFER"
+      ? "?utm_source=google&utm_medium=organic&utm_campaign=gbp_offer_post"
+      : "?utm_source=google&utm_medium=organic&utm_campaign=gbp_post"
+    );
+  };
+
+  const closeLinkEditor = () => {
+    if (linkEditRunning) return;
+    setLinkEditBatch(null);
+  };
+
+  // Loop through the update route in chunks (same shape as verify).
+  // Server processes up to 50 shops per call and returns the rest as
+  // remainingShopIds. Live progress updates in linkResultByBatch after
+  // each chunk.
+  const runLinkUpdate = async () => {
+    if (!linkEditBatch) return;
+    const batchId = linkEditBatch.batch_id;
+
+    if (!linkEditUseShopWebsite && !linkEditUrl.trim()) {
+      showToast("Enter a new URL or enable per-shop URL mode", true);
+      return;
+    }
+
+    setLinkEditRunning(true);
+    setLinkResultByBatch((s) => ({
+      ...s,
+      [batchId]: { running: true, succeeded: 0, failed: 0, skipped: 0, results: [] },
+    }));
+
+    let totalSucceeded = 0;
+    let totalFailed = 0;
+    let totalSkipped = 0;
+    const combined = [];
+    let nextShopIds = null;
+
+    try {
+      while (true) {
+        const body = {
+          batchId,
+          ...(nextShopIds !== null ? { shopIds: nextShopIds } : {}),
+          ...(linkEditUseShopWebsite
+            ? { useShopWebsite: true, utmSuffix: linkEditUtm.trim() }
+            : { newUrl: linkEditUrl.trim() }),
+        };
+        const res = await fetch("/api/gbp/bulk-update-link", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setLinkResultByBatch((s) => ({
+            ...s,
+            [batchId]: { running: false, error: data.error || `HTTP ${res.status}` },
+          }));
+          showToast(data.error || "Update failed", true);
+          setLinkEditRunning(false);
+          return;
+        }
+        totalSucceeded += data.succeeded || 0;
+        totalFailed += data.failed || 0;
+        totalSkipped += data.skipped || 0;
+        if (Array.isArray(data.results)) combined.push(...data.results);
+
+        setLinkResultByBatch((s) => ({
+          ...s,
+          [batchId]: {
+            running: (data.remainingShopIds || []).length > 0,
+            succeeded: totalSucceeded,
+            failed: totalFailed,
+            skipped: totalSkipped,
+            total: combined.length,
+            results: [...combined],
+          },
+        }));
+
+        nextShopIds = Array.isArray(data.remainingShopIds) ? data.remainingShopIds : [];
+        if (nextShopIds.length === 0) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      showToast(
+        `Link update: ${totalSucceeded} updated · ${totalFailed} failed · ${totalSkipped} skipped`
+      );
+      setLinkEditBatch(null); // close modal on success
+    } catch (e) {
+      setLinkResultByBatch((s) => ({
+        ...s,
+        [batchId]: { running: false, error: e.message },
+      }));
+      showToast(e.message, true);
+    }
+    setLinkEditRunning(false);
   };
 
   // --- Render ---
@@ -1304,8 +1417,43 @@ export default function GbpPostsPage() {
                     >
                       {verify?.verifying ? "Verifying…" : "Verify"}
                     </button>
+                    <button
+                      onClick={() => openLinkEditor(h)}
+                      disabled={pushing || linkEditRunning}
+                      className="px-2 py-1 rounded text-[10px] font-semibold flex-shrink-0"
+                      style={{
+                        background: "#1c1c1f",
+                        border: "1px solid #2a2a2e",
+                        color: "#6ee7b7",
+                        opacity: (pushing || linkEditRunning) ? 0.5 : 1,
+                      }}
+                      title="Update the CTA or Redeem link on every live post in this batch"
+                    >
+                      Update link
+                    </button>
                   </div>
                 </div>
+                {linkResultByBatch[h.batch_id] && !linkResultByBatch[h.batch_id].running && linkResultByBatch[h.batch_id].results && (
+                  <div className="mt-1 p-3 rounded text-[11px]" style={{ background: "#0d281820", border: "1px solid #2d5a2d40" }}>
+                    <div style={{ color: "#aaa" }}>
+                      Link update: <span style={{ color: "#34d399" }}>{linkResultByBatch[h.batch_id].succeeded} updated</span>
+                      {linkResultByBatch[h.batch_id].failed > 0 && <span style={{ color: "#f87171" }}> · {linkResultByBatch[h.batch_id].failed} failed</span>}
+                      {linkResultByBatch[h.batch_id].skipped > 0 && <span style={{ color: "#fbbf24" }}> · {linkResultByBatch[h.batch_id].skipped} skipped</span>}
+                    </div>
+                    {linkResultByBatch[h.batch_id].failed > 0 && (
+                      <details className="mt-2" style={{ color: "#aaa" }}>
+                        <summary className="cursor-pointer text-[10px]" style={{ color: "#f87171" }}>Show failed shops</summary>
+                        <div className="mt-2 max-h-40 overflow-y-auto space-y-0.5">
+                          {linkResultByBatch[h.batch_id].results.filter((r) => r.state === "FAILED").map((r, i) => (
+                            <div key={i} className="text-[10px] font-mono" style={{ color: "#f8717199" }}>
+                              {r.shopId}: {r.error}
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                )}
                 {verify && !verify.verifying && (verify.results || verify.error) && (
                   <div className="mt-1 p-3 rounded text-[11px]" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
                     {verify.error ? (
@@ -1400,6 +1548,85 @@ export default function GbpPostsPage() {
               </button>
               <button onClick={runPush} className="px-4 py-2 rounded-md text-xs font-semibold text-white" style={{ background: "#0ea5e9" }}>
                 Push now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Link-update modal */}
+      {linkEditBatch && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}>
+          <div className="w-full max-w-[560px] rounded-xl overflow-hidden" style={{ background: "#151517", border: "1px solid #2a2a2e" }}>
+            <div className="px-5 py-4" style={{ borderBottom: "1px solid #2a2a2e" }}>
+              <h3 className="text-base font-semibold text-white">
+                Update {linkEditBatch.topic_type === "OFFER" ? "Redeem" : "CTA"} link
+              </h3>
+              <p className="text-xs mt-1" style={{ color: "#888" }}>
+                Batch of {linkEditBatch.total} {linkEditBatch.topic_type} posts · pushed {new Date(linkEditBatch.pushed_at).toLocaleString()}
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-4 text-sm" style={{ color: "#ccc" }}>
+              <div>
+                <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#888" }}>
+                  New URL source
+                </label>
+                <select
+                  value={linkEditUseShopWebsite ? "shop" : "same"}
+                  onChange={(e) => setLinkEditUseShopWebsite(e.target.value === "shop")}
+                  disabled={linkEditRunning}
+                  className="w-full px-3 py-2 rounded-md text-sm"
+                  style={{ background: "#0c0c0e", border: "1px solid #2a2a2e", color: "#e8e8e8" }}
+                >
+                  <option value="same">Same URL for every shop</option>
+                  <option value="shop">Each shop&rsquo;s location page URL</option>
+                </select>
+              </div>
+              {linkEditUseShopWebsite ? (
+                <div>
+                  <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#888" }}>
+                    UTM suffix (appended to each shop URL)
+                  </label>
+                  <input
+                    type="text"
+                    value={linkEditUtm}
+                    onChange={(e) => setLinkEditUtm(e.target.value)}
+                    disabled={linkEditRunning}
+                    className="w-full px-3 py-2 rounded-md text-sm font-mono"
+                    style={{ background: "#0c0c0e", border: "1px solid #2a2a2e", color: "#e8e8e8" }}
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-[11px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: "#888" }}>
+                    New URL
+                  </label>
+                  <input
+                    type="url"
+                    value={linkEditUrl}
+                    onChange={(e) => setLinkEditUrl(e.target.value)}
+                    disabled={linkEditRunning}
+                    placeholder="https://…"
+                    className="w-full px-3 py-2 rounded-md text-sm"
+                    style={{ background: "#0c0c0e", border: "1px solid #2a2a2e", color: "#e8e8e8" }}
+                  />
+                </div>
+              )}
+              <div className="text-[11px] p-2 rounded" style={{ background: "#2d1b0020", border: "1px solid #5c3a0040", color: "#fbbf24" }}>
+                Google may re-review each updated post. Posts can flip briefly to PROCESSING; some may end up REJECTED if the new URL trips a filter. Test one shop first if uncertain.
+              </div>
+              {linkResultByBatch[linkEditBatch.batch_id]?.running && (
+                <div className="text-[11px]" style={{ color: "#93c5fd" }}>
+                  Updating… {linkResultByBatch[linkEditBatch.batch_id].succeeded} done · {linkResultByBatch[linkEditBatch.batch_id].failed} failed / {linkEditBatch.total}
+                </div>
+              )}
+            </div>
+            <div className="px-5 py-4 flex justify-end gap-2" style={{ borderTop: "1px solid #2a2a2e" }}>
+              <button onClick={closeLinkEditor} disabled={linkEditRunning} className="px-4 py-2 rounded-md text-xs font-semibold" style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#aaa", opacity: linkEditRunning ? 0.5 : 1 }}>
+                Cancel
+              </button>
+              <button onClick={runLinkUpdate} disabled={linkEditRunning} className="px-4 py-2 rounded-md text-xs font-semibold text-white" style={{ background: linkEditRunning ? "#333" : "#0ea5e9", opacity: linkEditRunning ? 0.5 : 1 }}>
+                {linkEditRunning ? "Updating…" : `Update ${linkEditBatch.total} posts`}
               </button>
             </div>
           </div>
