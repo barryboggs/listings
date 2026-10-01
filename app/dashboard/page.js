@@ -169,6 +169,21 @@ export default function LocationsPage() {
     setEditingLocation(null);
     const richCount = meta.richFieldsUpdated || 0;
     const richSuffix = richCount > 0 ? ` + ${richCount} extra field${richCount === 1 ? "" : "s"}` : "";
+
+    // No core-tab fields changed. If the Extras tab PATCH already ran we're
+    // fully done; otherwise there's genuinely nothing to save.
+    const changes = locationData.changes || {};
+    if (Object.keys(changes).length === 0) {
+      if (richCount > 0) {
+        showToast(`Location updated — ${richCount} extra field${richCount === 1 ? "" : "s"} saved`);
+        logActivity("Updated location", locationData.name, locationData.brand, `Edit modal: ${richCount} rich field${richCount === 1 ? "" : "s"} only`);
+        fetchLocations();
+      } else {
+        showToast("No changes to save");
+      }
+      return;
+    }
+
     try {
       const res = await fetch(`/api/semrush/locations/${locationData.id}`, {
         method: "PUT",

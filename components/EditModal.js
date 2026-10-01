@@ -5,6 +5,11 @@ import { DEFAULT_HOURS, getBrandConfig } from "@/lib/data";
 
 const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 
+// Standard UTM string appended to every shop's website URL. Field is
+// pre-filled with this when a shop has no URL params, and clearing the
+// field restores it on save — we never want the URL params to be blank.
+const DEFAULT_URL_PARAMS = "utm_medium=organic&utm_source=google&utm_campaign=gmb&utm_term=website";
+
 const HOLIDAY_TYPES = [
   { value: "CLOSED", label: "Closed", desc: "Location is closed all day" },
   { value: "OPENED_ALL_DAY", label: "Open All Day", desc: "Location is open 24 hours" },
@@ -46,7 +51,10 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
   const brandData = (brandsList || []).find((b) => b.id === location.brand) || getBrandConfig(location.brand);
   const brandColor = brandData?.color || "#666";
 
-  const [formData, setFormData] = useState({ ...location });
+  const [formData, setFormData] = useState({
+    ...location,
+    urlParams: location.urlParams && location.urlParams.trim() ? location.urlParams : DEFAULT_URL_PARAMS,
+  });
   const [hours, setHours] = useState(() => parseBusinessHours(location.businessHours));
   const [holidayHours, setHolidayHours] = useState(() => location.holidayHours || []);
   const [activeTab, setActiveTab] = useState(initialTab || "details");
@@ -189,6 +197,56 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
 
   const hasErrors = (location.semrushErrors || []).length > 0;
 
+  // Compute core-tab fields the user actually changed vs. the original
+  // location. Sending only these as the Semrush PATCH mask keeps the API
+  // from re-validating unchanged fields — a null `coordinates`, empty
+  // `category_ids`, etc. on untouched rows was causing a generic 400
+  // "Invalid request." any time the mask included them. Business hours
+  // compare in parseBusinessHours() shape (the form the user actually
+  // sees/edits); holiday hours compare whole-array.
+  const coreDirtyChanges = () => {
+    const out = {};
+    const scalarKeys = [
+      "name",
+      "address",
+      "additionalAddressInfo",
+      "city",
+      "state",
+      "zip",
+      "phone",
+      "website",
+      "urlParams",
+    ];
+    for (const k of scalarKeys) {
+      let current = formData[k] ?? "";
+      const original = location[k] ?? "";
+      // Never let URL params be saved blank — restore the house default.
+      if (k === "urlParams" && (typeof current !== "string" || !current.trim())) {
+        current = DEFAULT_URL_PARAMS;
+      }
+      if (JSON.stringify(current) !== JSON.stringify(original)) out[k] = current;
+    }
+
+    if (JSON.stringify(parseBusinessHours(location.businessHours)) !== JSON.stringify(hours)) {
+      out.businessHours = hours;
+    }
+
+    if (JSON.stringify(location.holidayHours || []) !== JSON.stringify(holidayHours || [])) {
+      out.holidayHours = holidayHours;
+    }
+
+    // Status is server-derived from reopen_date. If the user toggled to
+    // "active" and the original had a reopen date, clear it. If they
+    // toggled or edited temp_closed, send the picked reopen date.
+    if (formData.status === "active" && location.reopenDate) {
+      out.reopenDate = null;
+    } else if (formData.status === "temp_closed" && formData.reopenDate !== (location.reopenDate || null)) {
+      out.reopenDate = formData.reopenDate;
+    }
+
+    return out;
+  };
+
   const handleSave = async () => {
     if (saving) return;
 
@@ -238,20 +296,21 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
     }
 
     // 2. Core save — onSave triggers PUT /api/semrush/locations/[id] in
-    //    the parent and closes the modal. Post-migration this route now
-    //    PATCHes rich fields too, so we spread `rich` on top of formData
-    //    to carry the latest rich values through — otherwise formData's
-    //    stale rich fields (seeded from location on mount) would revert
-    //    the rich changes we just PATCHed in step 1. The second arg lets
-    //    the parent's toast acknowledge which rich fields ran first.
+    //    the parent and closes the modal. Rich fields were already PATCHed
+    //    in step 1 via /api/semrush/rich/[id], so this call only needs the
+    //    diff of core-tab fields. Sending the whole location triggered
+    //    Semrush's validator on fields the user didn't touch (null
+    //    coordinates, empty category_ids), surfaced as a generic 400.
+    const coreChanges = coreDirtyChanges();
     setSaved(true);
     setTimeout(() => {
       onSave(
         {
-          ...formData,
-          ...(rich || {}),
-          businessHours: hours,
-          holidayHours: holidayHours.length > 0 ? holidayHours : undefined,
+          id: location.id,
+          name: location.name,
+          brand: location.brand,
+          shopId: location.shopId,
+          changes: coreChanges,
         },
         { richFieldsUpdated }
       );
