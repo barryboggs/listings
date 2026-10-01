@@ -234,8 +234,12 @@ function buildChangesForField({ field, value, perLocationValues, existing, id })
         urlParams: existing.urlParams || "",
       };
     case "url_params":
+      // Params are joined onto the shop's existing base URL, so without a
+      // resolvable website there's nothing to attach them to — emitting an
+      // empty base would erase website_url. Skip instead of wiping.
+      if (!existing.website) return {};
       return {
-        website: existing.website || "",
+        website: existing.website,
         urlParams: typeof value === "string" ? value : "",
       };
     case "temp_closure":
