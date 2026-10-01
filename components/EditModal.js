@@ -214,17 +214,26 @@ export default function EditModal({ location, brands: brandsList, onClose, onSav
       "state",
       "zip",
       "phone",
-      "website",
-      "urlParams",
     ];
     for (const k of scalarKeys) {
-      let current = formData[k] ?? "";
+      const current = formData[k] ?? "";
       const original = location[k] ?? "";
-      // Never let URL params be saved blank — restore the house default.
-      if (k === "urlParams" && (typeof current !== "string" || !current.trim())) {
-        current = DEFAULT_URL_PARAMS;
-      }
       if (JSON.stringify(current) !== JSON.stringify(original)) out[k] = current;
+    }
+
+    // website + urlParams collapse into a single `website_url` on Semrush's
+    // side, so they must travel together. Sending urlParams alone makes the
+    // joiner build against an empty base and wipe the website — Semrush
+    // rejects that with GBP_WEBSITE_WITHOUT_PRIMARY_WEBSITE.
+    const website = String(formData.website ?? "");
+    let urlParams = String(formData.urlParams ?? "");
+    // Never persist blank params — restore the house default. Except on a
+    // shop with no website at all, where params have nothing to attach to.
+    if (!urlParams.trim()) urlParams = DEFAULT_URL_PARAMS;
+    if (!website.trim()) urlParams = "";
+    if (website !== String(location.website ?? "") || urlParams !== String(location.urlParams ?? "")) {
+      out.website = website;
+      out.urlParams = urlParams;
     }
 
     if (JSON.stringify(parseBusinessHours(location.businessHours)) !== JSON.stringify(hours)) {
