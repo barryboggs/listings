@@ -18,7 +18,7 @@ Required env vars (see `.env.example`):
 - `SEMRUSH_API_KEY` — required for live mode. Without it the app runs in **demo mode** (seed data from `lib/data.js`). Pulled from the Semrush Subscription Info page. Uses `Authorization: Apikey` header. This is a **long-lived credential** — no rotation, no expiry, no refresh cycle. If it stops working, generate a new one on the Semrush side and update the env var.
 - `POSTGRES_URL` / `DATABASE_URL` (any of the four Vercel Postgres vars) — optional. Without it `lib/db.js` falls back to in-memory storage seeded from `DEMO_USERS` and `ACTIVITY_LOG`.
 
-To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`, `lm_pending_pushes`, `lm_gbp_photo_pushes`, `lm_image_pushes`, `lm_integration_secrets`), an admin must POST `/api/db` once after deploying with the env var set. `CREATE TABLE IF NOT EXISTS` everywhere, so re-running is always safe.
+To initialize Postgres tables (`lm_users`, `lm_activity`, `lm_shop_numbers`, `lm_oauth_tokens`, `lm_pending_pushes`, `lm_gbp_photo_pushes`, `lm_image_pushes`, `lm_integration_secrets`, `lm_locations`), an admin must POST `/api/db` once after deploying with the env var set. `CREATE TABLE IF NOT EXISTS` everywhere, so re-running is always safe. (`/api/semrush/refresh-locations` also calls `initDatabase()` itself, so `lm_locations` self-heals on the first cron tick.)
 
 `lm_oauth_tokens` currently only carries rows for `provider = 'google_bp'` — the Semrush deprecated OAuth flow was retired during the July 2026 API migration. The table remains because the GBP integration scaffold uses it, but no Semrush code paths touch it anymore.
 
@@ -83,6 +83,20 @@ Rate limits aren't publicly documented for the rich API; a 250ms per-request thr
 The app's `location.id` is the rich-API `location_id`. Every route that receives an ID (path segment, request body, DB row) uses this value. Old-API IDs are no longer used at rest — pre-migration DB rows still carry `semrush_location_id` (old-API) alongside `semrush_new_id` (rich-API) on `lm_shop_numbers`, but the code path only reads `semrush_new_id`.
 
 Shop-number matching populates `semrush_new_id` via `/api/db/sync-rich-mappings` — matches shop records (in `lm_shop_numbers`) to rich API locations by website URL → phone → address+city (same heuristic order as the historical shop matcher). Idempotent; re-run any time.
+
+### Locations cache (`lm_locations`) — read this before touching the locations route
+
+The rich API's `GET /locations` caps at 50 items/page and has **no brand filter**, so building the full list means ~60 sequential requests at a 250ms throttle — roughly 30s for a few thousand shops. That used to run on every dashboard page load. It now runs on a cron, and the app reads from `lm_locations`.
+
+- **Table**: `location_id` PK, `brand`, `payload` JSONB, `synced_at`. `payload` is the **raw snake_case rich-API object**, not the app shape — so write-through can merge the same field set `appChangesToRichPatch` already produces, and `appLocationFromRich` still owns the read-time transform (transform changes need no resync).
+- **`brand` is computed by `detectBrand()` at sync time** so it can be indexed. Adding a brand to `BRAND_PATTERNS` needs a resync before it's filterable.
+- **Refresh**: `GET|POST /api/semrush/refresh-locations` (`maxDuration = 300`). Auth is admin/manager cookie **or** `Authorization: Bearer $CRON_SECRET`, matching `cleanup-expired-offers`. Scheduled `0 */2 * * *` in `vercel.json`; also the "Refresh now" link under the locations table.
+- **Truncation guard** in `replaceLocationsCache()`: the stale-row prune is skipped when the incoming set is under 80% of what's cached. Semrush erroring partway through pagination would otherwise delete most of the cache. A skipped prune reports `pruned: false`.
+- **Write-through**: `patchCachedLocations(ids, richFields)` shallow-merges the snake_case field set into cached payloads after a successful PATCH. Wired into the single-edit route, `bulk-update` (grouped by identical field set, so the common case is one UPDATE for the batch), and `holiday-push`. Top-level merge is correct here — it mirrors `update_mask` replacing whole values rather than deep-merging.
+- **`GET /api/semrush/locations` query params**: none → every visible location (**unchanged response shape** — the health, shops, map-markers, holiday-import and admin pages all depend on it, and all got the speedup for free); `?brand=a,b` → indexed per-brand lookup; `?summary=1` → brand counts + status distribution with no rows, which is what the dashboard paints first. Cached responses carry `cachedAt`.
+- **Fallbacks**: an empty or unreadable cache falls through to the live Semrush walk, so a cache problem degrades to the old slow behavior rather than an outage. Demo mode is unchanged and still load-bearing.
+
+**Gotcha if you edit the summary SQL**: Semrush omits `errors` entirely on a clean location, so `payload->'errors'` is SQL `NULL`. Testing that inline makes the whole expression `NULL`, and `NOT NULL` is `NULL`, which `FILTER` counts as no match — every clean location silently vanishes from the `healthy` bucket. The query computes the flags in a CTE with `CASE`/`COALESCE` for exactly this reason; `CASE` also guarantees `jsonb_array_length()` never runs on a non-array (it raises, and `AND` is not guaranteed to short-circuit).
 
 ### Bulk updates: per-location PATCH loop
 

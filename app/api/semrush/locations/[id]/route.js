@@ -6,7 +6,7 @@ import {
   getRichStatus,
   appChangesToRichPatch,
 } from "@/lib/semrush-rich";
-import { recordPendingPushes } from "@/lib/db";
+import { recordPendingPushes, patchCachedLocations } from "@/lib/db";
 
 /**
  * GET /api/semrush/locations/[id]?raw=1  (admin-only diagnostic)
@@ -103,6 +103,13 @@ export async function PUT(request, { params }) {
 
   try {
     const result = await updateRichLocation(locationId, fields, updateMask);
+
+    // Write through to the locations cache so the edit shows up on the next
+    // page load instead of waiting for the 2-hourly sync. Same snake_case
+    // field set we just sent Semrush, so cache and upstream agree.
+    patchCachedLocations([locationId], fields).catch((e) =>
+      console.error("patchCachedLocations (single):", e.message)
+    );
 
     // Record in the pending-approval queue so the user can find this shop
     // later in /dashboard/pending-approval without hunting in Semrush.

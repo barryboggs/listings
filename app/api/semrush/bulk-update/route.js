@@ -5,7 +5,7 @@ import {
   getRichStatus,
   appChangesToRichPatch,
 } from "@/lib/semrush-rich";
-import { recordPendingPushes } from "@/lib/db";
+import { recordPendingPushes, patchCachedLocations } from "@/lib/db";
 
 // Vercel Pro function timeout. 50 shops × ~500ms/shop network + 250ms throttle
 // = ~37.5s worst case; 90s headroom is plenty and matches the bulk-image route.
@@ -121,6 +121,11 @@ export async function PUT(request) {
 
   const results = [];
   const successfulRows = [];
+  // Cache write-through, grouped by identical field set → one UPDATE for the
+  // whole batch in the common case (same phone/description everywhere). Only
+  // per-location fields (phone_per_location, holiday_hours piggybacking each
+  // shop's own business_hours) produce more than one group.
+  const cachePatches = new Map();
 
   for (let i = 0; i < locationIds.length; i++) {
     const id = locationIds[i];
@@ -147,6 +152,9 @@ export async function PUT(request) {
     try {
       await updateRichLocation(id, fields, updateMask);
       results.push({ locationId: id, state: "UPDATED" });
+      const patchKey = JSON.stringify(fields);
+      if (!cachePatches.has(patchKey)) cachePatches.set(patchKey, []);
+      cachePatches.get(patchKey).push(id);
       successfulRows.push({
         semrushLocationId: id,
         locationName: existing.name || "",
@@ -176,6 +184,12 @@ export async function PUT(request) {
   if (successfulRows.length > 0) {
     recordPendingPushes(successfulRows).catch((e) =>
       console.error("recordPendingPushes (bulk):", e.message)
+    );
+  }
+
+  for (const [serialized, ids] of cachePatches) {
+    patchCachedLocations(ids, JSON.parse(serialized)).catch((e) =>
+      console.error("patchCachedLocations (bulk):", e.message)
     );
   }
 

@@ -5,7 +5,7 @@ import {
   getRichStatus,
   appChangesToRichPatch,
 } from "@/lib/semrush-rich";
-import { recordPendingPushes } from "@/lib/db";
+import { recordPendingPushes, patchCachedLocations } from "@/lib/db";
 
 // See /api/semrush/bulk-update — same shape and same reasoning for these.
 export const maxDuration = 90;
@@ -75,6 +75,12 @@ export async function POST(request) {
     try {
       await updateRichLocation(loc.id, fields, updateMask);
       pushed++;
+      // Write through to the locations cache so imported holiday hours are
+      // visible before the next scheduled sync. Per-location because each
+      // shop carries its own piggybacked business_hours.
+      patchCachedLocations([loc.id], fields).catch((e) =>
+        console.error("patchCachedLocations (holiday-push):", e.message)
+      );
       successPending.push({
         semrushLocationId: loc.id,
         locationName: loc.name || "",
