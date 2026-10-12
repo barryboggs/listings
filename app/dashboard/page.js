@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import EditModal from "@/components/EditModal";
 import BulkModal from "@/components/BulkModal";
 
@@ -63,6 +63,19 @@ function HoursBadge({ hoursStatus }) {
   );
 }
 
+/** "12 minutes ago" / "3 hours ago" for the cache-freshness line. */
+function formatAge(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  const mins = Math.round(ms / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 export default function LocationsPage() {
   const [activeBrands, setActiveBrands] = useState(null); // null until loaded
   const [search, setSearch] = useState("");
@@ -74,22 +87,24 @@ export default function LocationsPage() {
   const [brands, setBrands] = useState([]);
   const [dataSource, setDataSource] = useState("loading");
   const [loading, setLoading] = useState(true);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [cachedAt, setCachedAt] = useState(null);
+  const [serverStatusCounts, setServerStatusCounts] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Fetch locations from API proxy (which hits Semrush if token is set)
-  const fetchLocations = async () => {
+  // Initial paint pulls counts only — no shop rows. The Semrush list endpoint
+  // caps at 50/page with no brand filter, so assembling the full set is ~60
+  // sequential requests (~30s). The server now serves this from the
+  // lm_locations cache, and we only ask for rows once a brand is picked.
+  const fetchSummary = async () => {
     try {
-      const res = await fetch("/api/semrush/locations");
+      const res = await fetch("/api/semrush/locations?summary=1");
       const data = await res.json();
-      setLocations(data.locations || []);
       setBrands(data.brands || []);
       setDataSource(data.source || "unknown");
-      // First load: no brands active by default. Loading zero rows is
-      // near-instant, whereas rendering all shops across every brand
-      // was noticeably slow on the initial paint (measured seconds on
-      // ~5k rows). Users pick the brand(s) they want to inspect.
-      if (!activeBrands && data.brands) {
-        setActiveBrands(new Set());
-      }
+      setCachedAt(data.cachedAt || null);
+      setServerStatusCounts(data.statusCounts || null);
+      if (!activeBrands) setActiveBrands(new Set());
     } catch {
       setDataSource("error");
     } finally {
@@ -97,9 +112,72 @@ export default function LocationsPage() {
     }
   };
 
+  // Rows for the given brand selection. Served by an indexed lookup, so one
+  // brand comes back in a fraction of the full set's time. The sequence ref
+  // drops responses that land after a newer selection has been made.
+  const rowRequestRef = useRef(0);
+  const loadRows = async (brandSet) => {
+    if (!brandSet || brandSet.size === 0) {
+      setLocations([]);
+      return;
+    }
+    const seq = ++rowRequestRef.current;
+    setLoadingRows(true);
+    try {
+      const brandParam = [...brandSet].join(",");
+      const res = await fetch(`/api/semrush/locations?brand=${encodeURIComponent(brandParam)}`);
+      const data = await res.json();
+      if (seq !== rowRequestRef.current) return;
+      setLocations(data.locations || []);
+      setDataSource(data.source || "unknown");
+      if (data.cachedAt) setCachedAt(data.cachedAt);
+    } catch {
+      if (seq === rowRequestRef.current) setDataSource("error");
+    } finally {
+      if (seq === rowRequestRef.current) setLoadingRows(false);
+    }
+  };
+
+  // What the post-mutation handlers call: refresh both the counts and the
+  // rows currently on screen.
+  const fetchLocations = async () => {
+    fetchSummary();
+    await loadRows(activeBrands);
+  };
+
+  // Pull a fresh copy from Semrush into the cache, then reload. This is the
+  // only path that pays the full pagination cost, so it can take ~30s.
+  const refreshFromSemrush = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const res = await fetch("/api/semrush/refresh-locations", { method: "POST" });
+      const data = await res.json();
+      if (res.status === 401 || res.status === 403) {
+        showToast("Only admins and managers can refresh the location data");
+      } else if (!res.ok) {
+        showToast(`Refresh failed: ${data.error || `HTTP ${res.status}`}`);
+      } else {
+        showToast(`Refreshed ${data.fetched} locations from Semrush`);
+        await fetchLocations();
+      }
+    } catch (e) {
+      showToast(`Refresh failed: ${e.message}`);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   useEffect(() => {
-    fetchLocations();
+    fetchSummary();
   }, []);
+
+  // Refetch rows whenever the brand selection changes. activeBrands is a new
+  // Set on every toggle, so identity comparison is the right trigger.
+  useEffect(() => {
+    if (activeBrands) loadRows(activeBrands);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBrands]);
 
   const toggleBrand = (id) => {
     const next = new Set(activeBrands);
@@ -116,7 +194,12 @@ export default function LocationsPage() {
   // have for the full list. The problem buckets can overlap (a temp-closed
   // location can also have errors), so the counts won't necessarily sum to
   // total; that's expected for an at-a-glance summary.
+  // Prefer the server's counts: they're computed in SQL across every cached
+  // location, so the cards stay a whole-portfolio view even though `locations`
+  // now only holds the selected brands. Falls back to counting what we have
+  // (demo mode and the live-fetch path return rows instead of counts).
   const statusSummary = useMemo(() => {
+    if (serverStatusCounts) return serverStatusCounts;
     const out = { total: 0, healthy: 0, withErrors: 0, tempClosed: 0 };
     for (const loc of locations) {
       out.total++;
@@ -128,7 +211,7 @@ export default function LocationsPage() {
       if (!hasErrors && !isTempClosed) out.healthy++;
     }
     return out;
-  }, [locations]);
+  }, [locations, serverStatusCounts]);
 
   const filteredLocations = useMemo(() => {
     if (!activeBrands) return [];
@@ -561,14 +644,36 @@ export default function LocationsPage() {
 
         {filteredLocations.length === 0 && (
           <div className="py-12 text-center text-sm" style={{ color: "#555" }}>
-            No locations match your filters
+            {loadingRows
+              ? "Loading locations..."
+              : !activeBrands || activeBrands.size === 0
+                ? "Select a brand above to load its locations"
+                : "No locations match your filters"}
           </div>
         )}
       </div>
 
-      <div className="mt-2.5 text-[11px] text-right" style={{ color: "#444" }}>
-        Showing {filteredLocations.length} of {locations.length} locations
-        {dataSource === "demo" && " (demo data)"}
+      <div className="mt-2.5 flex justify-between items-center text-[11px]" style={{ color: "#444" }}>
+        <span>
+          {dataSource !== "demo" && (
+            <>
+              {cachedAt ? `Data synced ${formatAge(cachedAt)}` : "Live from Semrush (not yet cached)"}
+              {" · "}
+              <button
+                onClick={refreshFromSemrush}
+                disabled={refreshing}
+                className="underline"
+                style={{ color: refreshing ? "#444" : "#6e7681", background: "none", border: "none", padding: 0, cursor: refreshing ? "default" : "pointer" }}
+              >
+                {refreshing ? "Refreshing from Semrush..." : "Refresh now"}
+              </button>
+            </>
+          )}
+        </span>
+        <span>
+          Showing {filteredLocations.length} of {locations.length} locations
+          {dataSource === "demo" && " (demo data)"}
+        </span>
       </div>
 
       {/* Modals */}

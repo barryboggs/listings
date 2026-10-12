@@ -4,6 +4,10 @@
     {
       "path": "/api/gbp/cleanup-expired-offers",
       "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/semrush/refresh-locations",
+      "schedule": "0 */2 * * *"
     }
   ]
 }
