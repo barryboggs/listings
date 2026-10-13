@@ -47,6 +47,29 @@ function buildMonthOptions(now = new Date()) {
   return opts;
 }
 
+const pad2 = (n) => String(n).padStart(2, "0");
+
+// Last 4 complete calendar quarters, most recent first. On 2026-10-13
+// the default is Q3 2026 (2026-07-01 → 2026-09-30).
+function buildQuarterOptions(now = new Date()) {
+  const opts = [];
+  let y = now.getUTCFullYear();
+  let q = Math.floor(now.getUTCMonth() / 3); // current quarter, 0-indexed
+  for (let i = 0; i < 4; i++) {
+    q -= 1;
+    if (q < 0) { q = 3; y -= 1; }
+    const startMonth = q * 3 + 1;
+    const lastDay = new Date(Date.UTC(y, startMonth + 2, 0)).getUTCDate();
+    opts.push({
+      value: `${y}Q${q + 1}`,
+      label: `Q${q + 1} ${y}`,
+      start: `${y}-${pad2(startMonth)}-01`,
+      end: `${y}-${pad2(startMonth + 2)}-${pad2(lastDay)}`,
+    });
+  }
+  return opts;
+}
+
 function fmtPct(n) {
   return `${Math.round((n || 0) * 100)}%`;
 }
@@ -148,22 +171,27 @@ export default function ReviewsPage() {
   const SYNC_CHUNK_SIZE = 30;
   const SYNC_INTER_CHUNK_DELAY_MS = 500;
 
-  const handleSync = async ({ fullResync = false } = {}) => {
-    if (syncing || !brand) return;
+  // `brandIds` defaults to the page's selected brand; the CSV export panel
+  // passes several brands plus `since` (YYYY-MM-DD) to pull just one period.
+  const handleSync = async ({ fullResync = false, brandIds = brand ? [brand] : [], since = null } = {}) => {
+    if (syncing || brandIds.length === 0) return;
+    const targetLabel = brandIds.length === 1 ? brandLabel(brandIds[0]) : `${brandIds.length} brands`;
     const msg = fullResync
-      ? `Full re-sync of ${brandLabel(brand)}? Bypasses the incremental optimization — walks every shop's full review history from Google. Slower but catches deletions.`
-      : `Sync new/updated reviews for ${brandLabel(brand)}? Uses incremental optimization (skips reviews we already have).`;
+      ? `Full re-sync of ${targetLabel}? Bypasses the incremental optimization — walks every shop's full review history from Google. Slower but catches deletions.`
+      : since
+        ? `Sync reviews for ${targetLabel} updated since ${since}? Stops at older reviews, so history before ${since} isn't pulled (use Full later if you need it).`
+        : `Sync new/updated reviews for ${targetLabel}? Uses incremental optimization (skips reviews we already have).`;
     if (!confirm(msg)) return;
 
     // Grab the target shop_ids up front so we can chunk. If the brand's
     // shop list somehow shifts mid-sync (unlikely), the chunks stay
     // pinned to the initial snapshot.
     const brandEligibleShopIds = shops
-      .filter((s) => s.brand === brand && s.gbp_location_id)
+      .filter((s) => brandIds.includes(s.brand) && s.gbp_location_id)
       .map((s) => s.shop_id);
 
     if (brandEligibleShopIds.length === 0) {
-      showToast(`No mapped shops for ${brandLabel(brand)} — run mapping sync first`, true);
+      showToast(`No mapped shops for ${targetLabel} — run mapping sync first`, true);
       return;
     }
 
@@ -181,6 +209,7 @@ export default function ReviewsPage() {
     let totalReviewsFetched = 0;
     let totalInserted = 0;
     let totalShortCircuited = 0;
+    let totalCutoffStopped = 0;
     const errors = [];
 
     setSyncProgress({
@@ -203,7 +232,12 @@ export default function ReviewsPage() {
         const res = await fetch("/api/gbp/sync-reviews", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ brand, shopIds: chunks[i], fullResync }),
+          body: JSON.stringify({
+            brand: brandIds.length === 1 ? brandIds[0] : "*",
+            shopIds: chunks[i],
+            fullResync,
+            ...(since ? { since } : {}),
+          }),
         });
         const data = await res.json();
         if (res.ok) {
@@ -212,6 +246,7 @@ export default function ReviewsPage() {
           totalReviewsFetched += data.reviewsFetched || 0;
           totalInserted += data.inserted || 0;
           totalShortCircuited += data.shortCircuited || 0;
+          totalCutoffStopped += data.cutoffStopped || 0;
           if (Array.isArray(data.errors)) {
             for (const e of data.errors) {
               if (errors.length < 30) errors.push(e);
@@ -235,6 +270,8 @@ export default function ReviewsPage() {
         reviewsFetched: totalReviewsFetched,
         inserted: totalInserted,
         shortCircuited: totalShortCircuited,
+        cutoffStopped: totalCutoffStopped,
+        since,
         errors,
       });
 
@@ -259,7 +296,8 @@ export default function ReviewsPage() {
 
     const cancelSuffix = syncCancelRef.current ? " (stopped)" : "";
     const shortNote = totalShortCircuited > 0 ? ` · ${totalShortCircuited} shops short-circuited by incremental` : "";
-    showToast(`Synced ${totalReviewsFetched} reviews across ${totalShopsProcessed} shops${shortNote}${cancelSuffix}`);
+    const cutoffNote = since ? ` (updated since ${since})` : "";
+    showToast(`Synced ${totalReviewsFetched} reviews${cutoffNote} across ${totalShopsProcessed} shops${shortNote}${cancelSuffix}`);
 
     fetch(`/api/gbp/reviews-report?brand=${encodeURIComponent(brand)}&month=${month}`)
       .then((r) => r.json())
@@ -505,6 +543,14 @@ export default function ReviewsPage() {
         <EnrichProgressPanel progress={enrichProgress} />
       )}
 
+      <ReviewCsvExportPanel
+        shops={shops}
+        brands={brands}
+        syncing={syncing}
+        onSync={handleSync}
+        showToast={showToast}
+      />
+
       {loading && (
         <div className="text-center py-12 text-xs" style={{ color: "#666" }}>Loading report…</div>
       )}
@@ -654,6 +700,188 @@ function RatingDistribution({ distribution, total }) {
   );
 }
 
+// -------- Raw CSV export (one row per review) --------
+
+/**
+ * Exports individual reviews for a date range across any set of brands,
+ * in the column layout of the brand teams' existing Reviews_YYYYQn.csv.
+ * Separate from the monthly theme report above — no AI enrichment needed.
+ *
+ * "Sync for this period" runs the shared sync loop with `since` = range
+ * start, so a never-synced brand only walks back to the period instead
+ * of its whole history.
+ */
+function ReviewCsvExportPanel({ shops, brands, syncing, onSync, showToast }) {
+  const quarterOptions = useMemo(() => buildQuarterOptions(), []);
+  const [period, setPeriod] = useState(quarterOptions[0].value);
+  const [customStart, setCustomStart] = useState(quarterOptions[0].start);
+  const [customEnd, setCustomEnd] = useState(quarterOptions[0].end);
+  const [selected, setSelected] = useState(null); // Set of brand ids; null until brands load
+  const [exporting, setExporting] = useState(false);
+  const [result, setResult] = useState(null);
+
+  // Default to every brand once the brand list arrives.
+  useEffect(() => {
+    if (selected === null && brands.length > 0) setSelected(new Set(brands.map((b) => b.id)));
+  }, [brands, selected]);
+
+  const quarter = quarterOptions.find((o) => o.value === period);
+  const start = quarter ? quarter.start : customStart;
+  const end = quarter ? quarter.end : customEnd;
+  const chosen = selected ? brands.filter((b) => selected.has(b.id)).map((b) => b.id) : [];
+  const allChosen = chosen.length === brands.length && brands.length > 0;
+
+  const totalByBrand = useMemo(() => {
+    const m = new Map();
+    for (const s of shops) m.set(s.brand, (m.get(s.brand) || 0) + 1);
+    return m;
+  }, [shops]);
+  const mappedTotal = brands.filter((b) => chosen.includes(b.id)).reduce((n, b) => n + b.count, 0);
+  const shopTotal = chosen.reduce((n, id) => n + (totalByBrand.get(id) || 0), 0);
+  const unlistedBrands = [...totalByBrand.keys()].filter((id) => !brands.some((b) => b.id === id));
+
+  const toggle = (id) => {
+    setSelected((prev) => {
+      const next = new Set(prev || []);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const toggleAll = () => setSelected(allChosen ? new Set() : new Set(brands.map((b) => b.id)));
+
+  const rangeValid = /^\d{4}-\d{2}-\d{2}$/.test(start) && /^\d{4}-\d{2}-\d{2}$/.test(end) && start <= end;
+  const canRun = rangeValid && chosen.length > 0 && !exporting && !syncing;
+
+  const handleExport = async () => {
+    if (!canRun) return;
+    setExporting(true);
+    setResult(null);
+    try {
+      const res = await fetch("/api/gbp/reviews-csv-export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ start, end, brands: chosen }),
+      });
+      if ((res.headers.get("Content-Type") || "").includes("text/csv")) {
+        // No Blob store configured (local dev) — the CSV came back inline.
+        const summary = JSON.parse(res.headers.get("X-Export-Summary") || "{}");
+        const objectUrl = URL.createObjectURL(await res.blob());
+        triggerDownload(objectUrl, summary.filename || "reviews.csv");
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
+        setResult(summary);
+      } else {
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(data.error || `Export failed (HTTP ${res.status})`, true);
+          return;
+        }
+        triggerDownload(data.url, data.filename);
+        setResult(data);
+      }
+    } catch (e) {
+      showToast(`Export failed: ${e.message}`, true);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const inputStyle = { background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#e8e8e8" };
+
+  return (
+    <div className="rounded-xl p-4 mb-5" style={{ background: "#151517", border: "1px solid #1e1e22" }}>
+      <div className="flex flex-wrap justify-between items-baseline gap-2 mb-3">
+        <h3 className="text-xs font-bold uppercase tracking-wider" style={{ color: "#6ee7b7" }}>Review CSV export</h3>
+        <div className="text-[10px]" style={{ color: "#666" }}>
+          One row per review: business, address, shop ID, rating, date (UTC), text
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2 items-center mb-3">
+        <select
+          value={period}
+          onChange={(e) => setPeriod(e.target.value)}
+          className="px-3 py-2 rounded-md text-xs font-semibold"
+          style={inputStyle}
+        >
+          {quarterOptions.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+          <option value="custom">Custom range…</option>
+        </select>
+        {quarter ? (
+          <span className="text-[11px]" style={{ color: "#888" }}>{start} → {end}</span>
+        ) : (
+          <>
+            <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="px-2 py-1.5 rounded-md text-xs" style={inputStyle} />
+            <span className="text-xs" style={{ color: "#666" }}>→</span>
+            <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className="px-2 py-1.5 rounded-md text-xs" style={inputStyle} />
+          </>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1.5 mb-3">
+        <label className="flex items-center gap-1.5 text-xs font-semibold cursor-pointer" style={{ color: "#e8e8e8" }}>
+          <input type="checkbox" checked={allChosen} onChange={toggleAll} />
+          All brands
+        </label>
+        {brands.map((b) => (
+          <label key={b.id} className="flex items-center gap-1.5 text-xs cursor-pointer" style={{ color: "#bbb" }}>
+            <input type="checkbox" checked={!!selected?.has(b.id)} onChange={() => toggle(b.id)} />
+            <span style={{ color: b.color || "#bbb" }}>●</span>
+            {b.name || b.id}
+            <span className="text-[10px]" style={{ color: "#666" }}>{b.count}/{totalByBrand.get(b.id) || b.count}</span>
+          </label>
+        ))}
+      </div>
+
+      <div className="text-[11px] mb-3" style={{ color: mappedTotal < shopTotal ? "#fbbf24" : "#666" }}>
+        {mappedTotal} of {shopTotal} shops in the selected brands have a Google location mapped.
+        {mappedTotal < shopTotal && ` The other ${shopTotal - mappedTotal} can't be synced or exported until they're mapped.`}
+        {unlistedBrands.length > 0 && (
+          <span style={{ color: "#666" }}> Not listed (no mapped shops): {unlistedBrands.map((id) => getBrandConfig(id || "unknown").name).join(", ")}.</span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2 items-center">
+        <button
+          onClick={() => onSync({ brandIds: chosen, since: start })}
+          disabled={!canRun}
+          className="px-3 py-2 rounded-md text-xs font-semibold text-white"
+          style={{ background: "#0ea5e9", opacity: canRun ? 1 : 0.5 }}
+          title={`Pulls reviews updated since ${start} for the selected brands. Already-synced brands finish fast.`}
+        >
+          Sync selected brands for this period
+        </button>
+        <button
+          onClick={handleExport}
+          disabled={!canRun}
+          className="px-3 py-2 rounded-md text-xs font-semibold"
+          style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#6ee7b7", opacity: canRun ? 1 : 0.5 }}
+        >
+          {exporting ? "Building CSV…" : "⬇ Export CSV"}
+        </button>
+        {result && (
+          <span className="text-[11px]" style={{ color: "#888" }}>
+            {result.url
+              ? <a href={result.url} style={{ color: "#6ee7b7" }}>{result.filename}</a>
+              : result.filename}
+            {` · ${result.rows.toLocaleString()} reviews from ${result.coverage.shopsWithReviews} shops`}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function triggerDownload(href, filename) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 // -------- Progress panels for sync + enrich --------
 
 function ProgressBar({ value, max, color = "#0ea5e9" }) {
@@ -669,7 +897,7 @@ function SyncProgressPanel({ progress }) {
   const {
     phase, chunk, totalChunks, totalShops,
     shopsProcessed, shopsSkipped, reviewsFetched,
-    inserted, shortCircuited, errors,
+    inserted, shortCircuited, cutoffStopped, since, errors,
   } = progress;
   const isRunning = phase === "starting" || phase === "fetching";
   const done = phase === "done";
@@ -687,6 +915,8 @@ function SyncProgressPanel({ progress }) {
         <div className="text-[10px]" style={{ color: "#666" }}>
           {shopsProcessed + shopsSkipped}/{totalShops} shops · {reviewsFetched} reviews landed
           {shortCircuited > 0 && ` · ${shortCircuited} short-circuited by incremental`}
+          {since && ` · updated since ${since}`}
+          {cutoffStopped > 0 && ` (${cutoffStopped} shops stopped at cutoff)`}
           {shopsSkipped > 0 && ` · ${shopsSkipped} skipped`}
         </div>
       </div>
