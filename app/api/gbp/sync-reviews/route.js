@@ -40,7 +40,20 @@ const MAX_PAGES_PER_SHOP = 100;
  *                                    // list). Recommended for the periodic
  *                                    // full refresh; default (false) is
  *                                    // the fast path for regular syncs.
+ *     since?: "2026-07-01",         // stop each shop's pagination at the
+ *                                    // first review last updated before
+ *                                    // this date (UTC). For pulling one
+ *                                    // period without walking years of
+ *                                    // history on a never-synced brand.
  *   }
+ *
+ * `since` cutoff: the list is ordered by updateTime desc and a review's
+ * createTime is never after its updateTime, so once updateTime drops
+ * below `since` no later review on that shop can have been created on or
+ * after it — nothing in the requested period is skipped. Caveat: the
+ * pre-cutoff history is never stored, and later incremental syncs stop at
+ * the first known review, so they won't backfill it either. Run a Full
+ * re-sync if older months are needed afterwards.
  *
  * Incremental optimization (default): we pre-load the review_names +
  * google_updated_at already stored for the target shops, then break out
@@ -78,6 +91,13 @@ export async function POST(request) {
   const brand = body.brand && body.brand !== "*" ? body.brand : null;
   const explicitShopIds = Array.isArray(body.shopIds) ? new Set(body.shopIds) : null;
   const fullResync = !!body.fullResync;
+  let sinceMs = null;
+  if (body.since) {
+    sinceMs = /^\d{4}-\d{2}-\d{2}$/.test(body.since) ? Date.parse(`${body.since}T00:00:00Z`) : NaN;
+    if (Number.isNaN(sinceMs)) {
+      return NextResponse.json({ error: "since must be YYYY-MM-DD" }, { status: 400 });
+    }
+  }
 
   const allShops = await getShopNumbers();
   const eligible = allShops.filter((s) => {
@@ -104,6 +124,7 @@ export async function POST(request) {
   let reviewsFetched = 0;
   let inserted = 0;
   let shortCircuited = 0; // count of shops where incremental exit fired
+  let cutoffStopped = 0; // count of shops where the `since` cutoff fired
   const errors = [];
 
   // Pre-load known reviews for the target shops in one query. Empty map
@@ -119,6 +140,7 @@ export async function POST(request) {
     let pageToken = null;
     let pageCount = 0;
     let hitKnown = false;
+    let hitCutoff = false;
     try {
       while (pageCount < MAX_PAGES_PER_SHOP) {
         const page = await listReviews({
@@ -129,6 +151,10 @@ export async function POST(request) {
         const pageReviews = Array.isArray(page.reviews) ? page.reviews : [];
 
         for (const rev of pageReviews) {
+          if (sinceMs != null && rev.updateTime && Date.parse(rev.updateTime) < sinceMs) {
+            hitCutoff = true;
+            break;
+          }
           // Incremental short-circuit: Google returns reviews ordered by
           // updateTime desc. First review we see that we already have
           // (same review_name) AND whose updateTime hasn't advanced —
@@ -157,7 +183,7 @@ export async function POST(request) {
           });
         }
 
-        if (hitKnown) break;
+        if (hitKnown || hitCutoff) break;
         pageCount++;
         pageToken = page.nextPageToken || null;
         if (!pageToken) break;
@@ -169,6 +195,7 @@ export async function POST(request) {
       inserted += res.inserted;
       shopsProcessed++;
       if (hitKnown) shortCircuited++;
+      if (hitCutoff) cutoffStopped++;
     } catch (e) {
       shopsSkipped++;
       const message = e.message || "Unknown";
@@ -184,7 +211,7 @@ export async function POST(request) {
     action: "Synced GBP reviews",
     location: "",
     brand: brand || "all",
-    details: `shops:${shopsProcessed}/${eligible.length} reviews:${reviewsFetched} inserted:${inserted} shortCircuited:${shortCircuited}${fullResync ? " (full resync)" : ""}`,
+    details: `shops:${shopsProcessed}/${eligible.length} reviews:${reviewsFetched} inserted:${inserted} shortCircuited:${shortCircuited}${fullResync ? " (full resync)" : ""}${body.since ? ` since:${body.since} cutoffStopped:${cutoffStopped}` : ""}`,
   }).catch(() => {});
 
   return NextResponse.json({
@@ -192,6 +219,7 @@ export async function POST(request) {
     shopsProcessed,
     shopsSkipped,
     shortCircuited,
+    cutoffStopped,
     reviewsFetched,
     inserted,
     updated: 0,

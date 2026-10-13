@@ -185,6 +185,12 @@ The schema migration (`ALTER TABLE lm_users ADD COLUMN IF NOT EXISTS password_te
 
 `semrushErrors` shape (per location, from the rich API's `errors` array): `[{ code: string, message: string, details?: [...] }]`. Errors are emitted by Semrush after a push to a downstream directory fails — they typically resolve when the offending field is corrected and the listing is re-pushed.
 
+### Review CSV export
+
+[/dashboard/reviews](app/dashboard/reviews/page.js) has a "Review CSV export" panel next to the monthly theme report. It needs no AI enrichment. `POST /api/gbp/reviews-csv-export` (admin-only) takes `{ start, end, brands }` (inclusive UTC dates) and writes one row per `lm_reviews` row joined to `lm_shop_numbers`, using the brand teams' `Reviews_YYYYQn.csv` columns: BusinessName (brand display name), address, Client Location ID (`shop_id`), Rating, Review Date (M/D/YYYY UTC), Review Detail. A quarter across all brands is over Vercel's 4.5 MB response cap, so the file goes to Vercel Blob and the response returns its `downloadUrl`. Without `BLOB_READ_WRITE_TOKEN` the CSV comes back inline.
+
+The panel's "Sync for this period" button passes `since` = range start to `/api/gbp/sync-reviews`, which stops each shop's pagination at the first review last updated before that date. **Caveat:** pre-cutoff history is never stored, and later incremental syncs stop at the first known review, so they won't backfill it. Run a Full re-sync before building monthly reports for earlier months.
+
 ### Shop numbers
 
 Driven Brands' internal "Shop ID" doesn't exist in Semrush — the `lm_shop_numbers` table joins the two. There are **two overlapping routes** here: `/api/shops` (admin-only, full CSV import + auto-match) and `/api/shop-numbers` (admin-or-manager, supports separate `import`/`auto-match`/`manual-match` actions). When adding shop-related features, prefer extending `/api/shop-numbers` since it has the finer-grained actions. Both use the same three matching strategies in `lib/db.js`:
