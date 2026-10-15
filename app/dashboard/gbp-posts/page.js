@@ -1332,7 +1332,7 @@ export default function GbpPostsPage() {
                 {batchProgress.failures && batchProgress.failures.length > 0 && (
                   <FailurePanel
                     failures={batchProgress.failures}
-                    brandLocations={brandLocations}
+                    shops={brandShops}
                     pushing={pushing}
                     onRetry={(retryShopIds) => runPush(retryShopIds)}
                   />
@@ -1491,7 +1491,7 @@ export default function GbpPostsPage() {
                                 return (
                                   <div key={i} className="text-[10px] grid grid-cols-12 gap-2" style={{ color: "#f8717199" }}>
                                     <div className="col-span-1 font-mono" style={{ color: "#f87171" }}>{r.shopId}</div>
-                                    <div className="col-span-4 truncate">{shop ? shop.name : "—"}</div>
+                                    <div className="col-span-4 truncate">{shop?.street_address || "—"}</div>
                                     <div className="col-span-4 truncate">{shop ? `${shop.city}, ${shop.state}` : ""}</div>
                                     <div className="col-span-3 text-right">{r.error || "not on GBP"}</div>
                                   </div>
@@ -1647,14 +1647,15 @@ function StatCard({ label, value, color }) {
 
 /**
  * Failure detail panel — shown when a bulk-post run finishes with any
- * FAILED or REJECTED shops. Joins each failure to the shop's row in
- * `brandLocations` so we can show the shop name / city / state (not
- * just a bare shop_id). Splits FAILED (retryable — transient errors)
+ * FAILED or REJECTED shops. Joins each failure to the brand's
+ * lm_shop_numbers rows (`shops`) so we can show the street address /
+ * city / state (not just a bare shop_id). Shop rows carry no business
+ * name, hence the address. Splits FAILED (retryable — transient errors)
  * from REJECTED (Google auto-review, retrying with the same content
  * gets the same rejection, so no retry button for those).
  */
-function FailurePanel({ failures, brandLocations, pushing, onRetry }) {
-  const shopById = new Map((brandLocations || []).map((s) => [s.shop_id, s]));
+function FailurePanel({ failures, shops, pushing, onRetry }) {
+  const shopById = new Map((shops || []).map((s) => [s.shop_id, s]));
   const failed = failures.filter((f) => f.state === "FAILED");
   const rejected = failures.filter((f) => f.state === "REJECTED");
   const failedIds = failed.map((f) => f.shopId);
@@ -1686,7 +1687,7 @@ function FailurePanel({ failures, brandLocations, pushing, onRetry }) {
                 <div key={i} className="text-[10px] leading-snug grid grid-cols-12 gap-2" style={{ color: "#f8717199" }}>
                   <div className="col-span-1 font-mono" style={{ color: "#f87171" }}>{safeRenderable(f.shopId)}</div>
                   <div className="col-span-4 truncate" style={{ color: "#f87171cc" }}>
-                    {shop ? `${shop.name}` : "—"}
+                    {shop?.street_address || "—"}
                   </div>
                   <div className="col-span-2 truncate" style={{ color: "#f87171aa" }}>
                     {shop ? `${shop.city}, ${shop.state}` : ""}
@@ -1712,7 +1713,7 @@ function FailurePanel({ failures, brandLocations, pushing, onRetry }) {
                 <div key={i} className="text-[10px] leading-snug grid grid-cols-12 gap-2" style={{ color: "#fbbf2499" }}>
                   <div className="col-span-1 font-mono" style={{ color: "#fbbf24" }}>{safeRenderable(r.shopId)}</div>
                   <div className="col-span-4 truncate" style={{ color: "#fbbf24cc" }}>
-                    {shop ? shop.name : "—"}
+                    {shop?.street_address || "—"}
                   </div>
                   <div className="col-span-7 truncate" style={{ color: "#fbbf24aa" }}>
                     {shop ? `${shop.city}, ${shop.state}` : ""}
