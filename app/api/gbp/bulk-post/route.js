@@ -11,6 +11,7 @@ import {
   recordGbpPostPush,
   resolveGbpPostPush,
   getGbpPostBatches,
+  getGbpPostPushes,
   initDatabase,
   logActivity,
 } from "@/lib/db";
@@ -48,13 +49,19 @@ const POST_THROTTLE_MS = 250;
  *       startDate?, endDate?,        // OFFER only, YYYY-MM-DD, required for OFFER
  *       couponCode?, redeemUrl?, termsConditions?  // OFFER only, all optional
  *     },
- *     batchId: "<uuid or timestamp-string>"    // client-generated so a resumed run
+ *     batchId: "<uuid or timestamp-string>",   // client-generated so a resumed run
  *                                                can join the same audit group
+ *     skipAlreadyPosted?: boolean              // drop any target shop that this
+ *                                                batch already recorded as
+ *                                                SUCCESS / REJECTED / PENDING, so
+ *                                                a resumed run can't double-post
+ *                                                even if the client's list is stale
  *   }
  *
  * Response:
  *   {
  *     batchId, brand, topicType, total, succeeded, failed, rejected, skipped,
+ *     alreadyPosted,                // shops dropped by skipAlreadyPosted (0 otherwise)
  *     results: [{ shopId, state, gbpPostName?, gbpPostState?, error? }],
  *     errors: [{ shopId, error }]   // only failures, capped
  *   }
@@ -69,7 +76,7 @@ export async function POST(request) {
   }
 
   const body = await request.json().catch(() => ({}));
-  const { brand, shopIds, topicType, post, batchId } = body;
+  const { brand, shopIds, topicType, post, batchId, skipAlreadyPosted } = body;
 
   if (!brand || !topicType || !post || !batchId) {
     return NextResponse.json(
@@ -117,11 +124,35 @@ export async function POST(request) {
   // shop in the brand with a gbp_location_id populated.
   const allShops = await getShopNumbers();
   const brandShops = allShops.filter((s) => s.brand === brand);
-  const targetShops = shopIds && Array.isArray(shopIds) && shopIds.length > 0
+  let targetShops = shopIds && Array.isArray(shopIds) && shopIds.length > 0
     ? brandShops.filter((s) => shopIds.includes(s.shop_id))
     : brandShops;
 
+  // Resume guard. A run that died mid-way (page crash, closed tab) leaves
+  // the batch's audit rows as the only record of who got the post. When
+  // the client asks to continue that batch, drop every shop already
+  // recorded here — SUCCESS and REJECTED are on Google; PENDING means
+  // the row was written but the worker died before resolving it, which
+  // is unknown, so it's safer to leave it for Verify than to post again.
+  // Only FAILED rows (or no row at all) are fair game.
+  let alreadyPosted = 0;
+  if (skipAlreadyPosted) {
+    const prior = await getGbpPostPushes({ batchId, limit: 5000 });
+    const done = new Set(
+      prior.filter((r) => r.state !== "FAILED").map((r) => r.shop_id)
+    );
+    const before = targetShops.length;
+    targetShops = targetShops.filter((s) => !done.has(s.shop_id));
+    alreadyPosted = before - targetShops.length;
+  }
+
   if (targetShops.length === 0) {
+    if (alreadyPosted > 0) {
+      return NextResponse.json({
+        batchId, brand, topicType, total: 0, succeeded: 0, failed: 0, rejected: 0, skipped: 0,
+        alreadyPosted, results: [],
+      });
+    }
     return NextResponse.json({ error: `No shops found for brand=${brand}` }, { status: 400 });
   }
   if (targetShops.length > 50) {
@@ -277,6 +308,7 @@ export async function POST(request) {
     failed,
     rejected,
     skipped,
+    alreadyPosted,
     results,
     errors: errors.length > 0 ? errors : undefined,
   });
@@ -347,10 +379,13 @@ function buildShopUrl(shopWebsite, utmSuffix) {
 
 /**
  * GET /api/gbp/bulk-post?limit=50
+ * GET /api/gbp/bulk-post?batchId=<id>
  *
- * Recent bulk-post batches for the history panel. Each row is aggregated
- * from lm_gbp_post_pushes grouped by batch_id, with counts by state.
- * Any logged-in user can read (viewers see, don't act).
+ * Without batchId: recent bulk-post batches for the history panel. Each
+ * row is aggregated from lm_gbp_post_pushes grouped by batch_id, with
+ * counts by state. With batchId: that batch's per-shop rows (shop_id +
+ * state), which the "Continue" action uses to work out which shops the
+ * batch never reached. Any logged-in user can read (viewers see, don't act).
  */
 export async function GET(request) {
   const token = request.cookies.get("auth-token")?.value;
@@ -358,7 +393,17 @@ export async function GET(request) {
   const user = await verifyToken(token);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const limit = Number(new URL(request.url).searchParams.get("limit")) || 50;
+  const params = new URL(request.url).searchParams;
+  const batchId = params.get("batchId");
+  if (batchId) {
+    const rows = await getGbpPostPushes({ batchId, limit: 5000 });
+    return NextResponse.json({
+      batchId,
+      rows: rows.map((r) => ({ shopId: r.shop_id, state: r.state })),
+    });
+  }
+
+  const limit = Number(params.get("limit")) || 50;
   const batches = await getGbpPostBatches({ limit: Math.min(Math.max(limit, 1), 200) });
   return NextResponse.json({ batches });
 }

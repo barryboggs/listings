@@ -400,7 +400,11 @@ export default function GbpPostsPage() {
   // the push against just the shops that failed on the previous run,
   // reusing the currently-composed post payload. When omitted, uses
   // the checkbox selection (the normal Post-to-N-shops flow).
-  const runPush = async (overrideShopIds = null) => {
+  // `resumeBatchId` — "Continue" on a history row: join that batch's
+  // audit group instead of opening a new one, and have the server drop
+  // any shop the batch already recorded, so a stale client list can't
+  // double-post.
+  const runPush = async (overrideShopIds = null, { resumeBatchId = null } = {}) => {
     setConfirmOpen(false);
     if (validationError && !overrideShopIds) {
       showToast(validationError, true);
@@ -410,7 +414,8 @@ export default function GbpPostsPage() {
     setStopping(false);
     cancelRef.current = false;
 
-    const batchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const batchId = resumeBatchId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    let totalAlreadyPosted = 0;
     const shopIdList = overrideShopIds && overrideShopIds.length > 0
       ? overrideShopIds
       : selectedShops.map((s) => s.shop_id);
@@ -469,6 +474,7 @@ export default function GbpPostsPage() {
             topicType,
             post: postPayload,
             batchId,
+            ...(resumeBatchId ? { skipAlreadyPosted: true } : {}),
           }),
         });
         const data = await res.json();
@@ -477,6 +483,7 @@ export default function GbpPostsPage() {
           totalFailed += data.failed || 0;
           totalRejected += data.rejected || 0;
           totalSkipped += data.skipped || 0;
+          totalAlreadyPosted += data.alreadyPosted || 0;
           // Walk the full per-shop results array so nothing gets
           // silently dropped — we specifically capture FAILED and
           // REJECTED with their shop_id + error so the retry list
@@ -519,7 +526,7 @@ export default function GbpPostsPage() {
     showToast(
       cancelRef.current
         ? `Cancelled — ${totalSucceeded}/${totalEligible} posted before stop`
-        : `Posted to ${totalSucceeded}/${totalEligible} shops${totalFailed > 0 ? ` (${totalFailed} failed)` : ""}${totalRejected > 0 ? ` (${totalRejected} rejected by Google)` : ""}`,
+        : `Posted to ${totalSucceeded}/${totalEligible} shops${totalFailed > 0 ? ` (${totalFailed} failed)` : ""}${totalRejected > 0 ? ` (${totalRejected} rejected by Google)` : ""}${totalAlreadyPosted > 0 ? ` (${totalAlreadyPosted} already had it, left alone)` : ""}`,
       totalFailed > 0
     );
 
@@ -530,6 +537,60 @@ export default function GbpPostsPage() {
   const requestStop = () => {
     cancelRef.current = true;
     setStopping(true);
+  };
+
+  // Continue a batch that didn't reach every shop (page crashed or was
+  // closed mid-run). Posts the CURRENTLY composed content to the brand's
+  // mapped shops that have no SUCCESS / REJECTED / PENDING row in the
+  // batch, joining the batch's audit group. The server re-applies the
+  // same exclusion (skipAlreadyPosted), so even a stale row list here
+  // can't double-post. The composer must hold the same post, because
+  // the audit rows store Google's per-shop body, not the composer fields.
+  const continueBatch = async (h) => {
+    if (pushing) return;
+    if (brandFilter !== h.brand) {
+      showToast(`Select ${getBrandConfig(h.brand).name} in the composer first — this batch belongs to that brand`, true);
+      return;
+    }
+    if (topicType !== h.topic_type) {
+      showToast(`This batch is a ${h.topic_type} post; switch the composer to ${h.topic_type} and re-enter the same content`, true);
+      return;
+    }
+    if (validationError) {
+      showToast(validationError, true);
+      return;
+    }
+    if (summary.trim() !== String(h.summary || "").trim()) {
+      showToast("The composer text doesn't match this batch's post. Re-enter the same post before continuing, or the remaining shops get different content.", true);
+      return;
+    }
+
+    let rows;
+    try {
+      const res = await fetch(`/api/gbp/bulk-post?batchId=${encodeURIComponent(h.batch_id)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      rows = Array.isArray(data.rows) ? data.rows : [];
+    } catch (e) {
+      showToast(`Couldn't load the batch's rows: ${e.message}`, true);
+      return;
+    }
+
+    const done = new Set(rows.filter((r) => r.state !== "FAILED").map((r) => r.shopId));
+    const remaining = eligibleShops.filter((s) => !done.has(s.shop_id)).map((s) => s.shop_id);
+    if (remaining.length === 0) {
+      showToast("Every mapped shop in this brand already has a record in this batch — nothing to continue. Use Verify to check they're live.");
+      return;
+    }
+
+    const ok = confirm(
+      `Continue this batch?\n\n` +
+      `Post to ${remaining.length} shop${remaining.length === 1 ? "" : "s"} in ${getBrandConfig(h.brand).name} that the batch hasn't reached.\n` +
+      `${done.size} shop${done.size === 1 ? "" : "s"} already recorded will be left alone.\n\n` +
+      `Uses the post currently in the composer.`
+    );
+    if (!ok) return;
+    runPush(remaining, { resumeBatchId: h.batch_id });
   };
 
   // Verify a batch: for each SUCCESS/REJECTED row in the batch, check
@@ -1332,7 +1393,7 @@ export default function GbpPostsPage() {
                 {batchProgress.failures && batchProgress.failures.length > 0 && (
                   <FailurePanel
                     failures={batchProgress.failures}
-                    brandLocations={brandLocations}
+                    shops={brandShops}
                     pushing={pushing}
                     onRetry={(retryShopIds) => runPush(retryShopIds)}
                   />
@@ -1417,6 +1478,22 @@ export default function GbpPostsPage() {
                     >
                       {verify?.verifying ? "Verifying…" : "Verify"}
                     </button>
+                    {canPush && (
+                      <button
+                        onClick={() => continueBatch(h)}
+                        disabled={pushing}
+                        className="px-2 py-1 rounded text-[10px] font-semibold flex-shrink-0"
+                        style={{
+                          background: "#1c1c1f",
+                          border: "1px solid #2a2a2e",
+                          color: "#fbbf24",
+                          opacity: pushing ? 0.5 : 1,
+                        }}
+                        title="Post the composed content to the brand's mapped shops this batch never reached. Shops already recorded in the batch are skipped."
+                      >
+                        Continue
+                      </button>
+                    )}
                     <button
                       onClick={() => openLinkEditor(h)}
                       disabled={pushing || linkEditRunning}
@@ -1491,7 +1568,7 @@ export default function GbpPostsPage() {
                                 return (
                                   <div key={i} className="text-[10px] grid grid-cols-12 gap-2" style={{ color: "#f8717199" }}>
                                     <div className="col-span-1 font-mono" style={{ color: "#f87171" }}>{r.shopId}</div>
-                                    <div className="col-span-4 truncate">{shop ? shop.name : "—"}</div>
+                                    <div className="col-span-4 truncate">{shop?.street_address || "—"}</div>
                                     <div className="col-span-4 truncate">{shop ? `${shop.city}, ${shop.state}` : ""}</div>
                                     <div className="col-span-3 text-right">{r.error || "not on GBP"}</div>
                                   </div>
@@ -1647,14 +1724,15 @@ function StatCard({ label, value, color }) {
 
 /**
  * Failure detail panel — shown when a bulk-post run finishes with any
- * FAILED or REJECTED shops. Joins each failure to the shop's row in
- * `brandLocations` so we can show the shop name / city / state (not
- * just a bare shop_id). Splits FAILED (retryable — transient errors)
+ * FAILED or REJECTED shops. Joins each failure to the brand's
+ * lm_shop_numbers rows (`shops`) so we can show the street address /
+ * city / state (not just a bare shop_id). Shop rows carry no business
+ * name, hence the address. Splits FAILED (retryable — transient errors)
  * from REJECTED (Google auto-review, retrying with the same content
  * gets the same rejection, so no retry button for those).
  */
-function FailurePanel({ failures, brandLocations, pushing, onRetry }) {
-  const shopById = new Map((brandLocations || []).map((s) => [s.shop_id, s]));
+function FailurePanel({ failures, shops, pushing, onRetry }) {
+  const shopById = new Map((shops || []).map((s) => [s.shop_id, s]));
   const failed = failures.filter((f) => f.state === "FAILED");
   const rejected = failures.filter((f) => f.state === "REJECTED");
   const failedIds = failed.map((f) => f.shopId);
@@ -1686,7 +1764,7 @@ function FailurePanel({ failures, brandLocations, pushing, onRetry }) {
                 <div key={i} className="text-[10px] leading-snug grid grid-cols-12 gap-2" style={{ color: "#f8717199" }}>
                   <div className="col-span-1 font-mono" style={{ color: "#f87171" }}>{safeRenderable(f.shopId)}</div>
                   <div className="col-span-4 truncate" style={{ color: "#f87171cc" }}>
-                    {shop ? `${shop.name}` : "—"}
+                    {shop?.street_address || "—"}
                   </div>
                   <div className="col-span-2 truncate" style={{ color: "#f87171aa" }}>
                     {shop ? `${shop.city}, ${shop.state}` : ""}
@@ -1712,7 +1790,7 @@ function FailurePanel({ failures, brandLocations, pushing, onRetry }) {
                 <div key={i} className="text-[10px] leading-snug grid grid-cols-12 gap-2" style={{ color: "#fbbf2499" }}>
                   <div className="col-span-1 font-mono" style={{ color: "#fbbf24" }}>{safeRenderable(r.shopId)}</div>
                   <div className="col-span-4 truncate" style={{ color: "#fbbf24cc" }}>
-                    {shop ? shop.name : "—"}
+                    {shop?.street_address || "—"}
                   </div>
                   <div className="col-span-7 truncate" style={{ color: "#fbbf24aa" }}>
                     {shop ? `${shop.city}, ${shop.state}` : ""}
