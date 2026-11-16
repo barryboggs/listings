@@ -222,6 +222,9 @@ export async function POST(request) {
       topicType,
       summary: post.summary,
       postBody,
+      // Composer-shape post, pre URL resolution, so Repost can reload
+      // the form exactly (including shop-website mode + UTM suffix).
+      postPayload: post,
       // Store the offer's end date so the cleanup cron can find and
       // delete this post from Google once the offer expires. STANDARD
       // posts don't expire (this stays null).
@@ -378,6 +381,71 @@ function buildShopUrl(shopWebsite, utmSuffix) {
 }
 
 /**
+ * Work out the composer-shape post a batch was sent with.
+ *
+ * Rows written since the post_payload column exists carry it verbatim —
+ * that's "exact". Older rows only have post_body, Google's per-shop body
+ * after URL resolution, so we rebuild: summary, media, CTA / offer fields
+ * map back one-to-one, but the link MODE doesn't — a fixed URL and a
+ * shop-website URL look the same in a single body. Across the batch they
+ * don't: shop-website mode yields a different URL per shop, a fixed URL
+ * yields one. One shop in shop-website mode is indistinguishable from a
+ * fixed URL and comes back as fixed; the UI flags "inferred" so the admin
+ * checks the link setting before reposting.
+ */
+function recoverComposerPost(rows, topicType) {
+  const exact = rows.find((r) => r.post_payload && typeof r.post_payload === "object" && r.post_payload.summary);
+  if (exact) return { post: exact.post_payload, recovered: "exact" };
+
+  const bodies = rows.map((r) => r.post_body).filter((b) => b && typeof b === "object" && b.summary);
+  if (bodies.length === 0 || !topicType) return { post: null, recovered: "none" };
+
+  const b = bodies[0];
+  const post = { summary: b.summary };
+  const media = Array.isArray(b.media) ? b.media[0] : null;
+  if (media?.sourceUrl) post.mediaUrl = media.sourceUrl;
+
+  const urlOf = topicType === "OFFER"
+    ? (x) => x.offer?.redeemOnlineUrl
+    : (x) => x.callToAction?.url;
+  const urls = [...new Set(bodies.map(urlOf).filter(Boolean))];
+  const shopMode = urls.length > 1;
+  const utmOf = (u) => { const i = u.indexOf("?"); return i >= 0 ? u.slice(i) : ""; };
+
+  if (topicType === "OFFER") {
+    post.title = b.event?.title || "";
+    post.startDate = partsToIso(b.event?.schedule?.startDate);
+    post.endDate = partsToIso(b.event?.schedule?.endDate);
+    if (b.offer?.couponCode) post.couponCode = b.offer.couponCode;
+    if (b.offer?.termsConditions) post.termsConditions = b.offer.termsConditions;
+    if (shopMode) {
+      post.useShopWebsite = true;
+      const utm = utmOf(urls[0]);
+      if (utm) post.utmSuffix = utm;
+    } else if (urls[0]) {
+      post.redeemUrl = urls[0];
+    }
+  } else if (b.callToAction?.actionType) {
+    post.cta = { actionType: b.callToAction.actionType };
+    if (b.callToAction.actionType !== "CALL") {
+      if (shopMode) {
+        post.cta.useShopWebsite = true;
+        const utm = utmOf(urls[0]);
+        if (utm) post.cta.utmSuffix = utm;
+      } else if (urls[0]) {
+        post.cta.url = urls[0];
+      }
+    }
+  }
+  return { post, recovered: "inferred" };
+}
+
+function partsToIso(parts) {
+  if (!parts || !parts.year) return "";
+  return `${parts.year}-${String(parts.month || 1).padStart(2, "0")}-${String(parts.day || 1).padStart(2, "0")}`;
+}
+
+/**
  * GET /api/gbp/bulk-post?limit=50
  * GET /api/gbp/bulk-post?batchId=<id>
  *
@@ -385,7 +453,11 @@ function buildShopUrl(shopWebsite, utmSuffix) {
  * row is aggregated from lm_gbp_post_pushes grouped by batch_id, with
  * counts by state. With batchId: that batch's per-shop rows (shop_id +
  * state), which the "Continue" action uses to work out which shops the
- * batch never reached. Any logged-in user can read (viewers see, don't act).
+ * batch never reached, plus `post` — the composer-shape post the batch
+ * was sent with, for the expanded history view and "Repost". `recovered`
+ * says how `post` was obtained: "exact" (stored post_payload), "inferred"
+ * (rebuilt from the per-shop Google bodies on pre-column rows; link mode
+ * is a guess), or "none". Any logged-in user can read (viewers see, don't act).
  */
 export async function GET(request) {
   const token = request.cookies.get("auth-token")?.value;
@@ -397,8 +469,13 @@ export async function GET(request) {
   const batchId = params.get("batchId");
   if (batchId) {
     const rows = await getGbpPostPushes({ batchId, limit: 5000 });
+    const topicType = rows[0]?.topic_type || null;
+    const { post, recovered } = recoverComposerPost(rows, topicType);
     return NextResponse.json({
       batchId,
+      topicType,
+      post,
+      recovered,
       rows: rows.map((r) => ({ shopId: r.shop_id, state: r.state })),
     });
   }
