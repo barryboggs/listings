@@ -119,6 +119,11 @@ export default function GbpPostsPage() {
   // that row expands to show the outcome.
   const [verifyByBatch, setVerifyByBatch] = useState({});
 
+  // Expanded history row + its fetched detail (full post as composed,
+  // per-shop rows). Keyed by batch_id; one row open at a time.
+  const [expandedBatchId, setExpandedBatchId] = useState(null);
+  const [detailByBatch, setDetailByBatch] = useState({});
+
   // Link-update modal state — set when admin clicks "Update link" on a
   // history row. `linkEditBatch` is the batch object being edited.
   // Modal closes when set to null.
@@ -591,6 +596,92 @@ export default function GbpPostsPage() {
     );
     if (!ok) return;
     runPush(remaining, { resumeBatchId: h.batch_id });
+  };
+
+  // Fetch a batch's detail (the post as composed + per-shop rows) once
+  // and cache it. Returns the detail or null after toasting the error.
+  const loadBatchDetail = async (batchId) => {
+    if (detailByBatch[batchId]?.post !== undefined) return detailByBatch[batchId];
+    setDetailByBatch((d) => ({ ...d, [batchId]: { loading: true } }));
+    try {
+      const res = await fetch(`/api/gbp/bulk-post?batchId=${encodeURIComponent(batchId)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const detail = { post: data.post || null, recovered: data.recovered, rows: data.rows || [] };
+      setDetailByBatch((d) => ({ ...d, [batchId]: detail }));
+      return detail;
+    } catch (e) {
+      setDetailByBatch((d) => ({ ...d, [batchId]: { error: e.message } }));
+      showToast(`Couldn't load the post: ${e.message}`, true);
+      return null;
+    }
+  };
+
+  const toggleBatchDetail = (h) => {
+    if (expandedBatchId === h.batch_id) {
+      setExpandedBatchId(null);
+      return;
+    }
+    setExpandedBatchId(h.batch_id);
+    loadBatchDetail(h.batch_id);
+  };
+
+  // Load a previous batch's post back into the composer so it can be
+  // posted again (same brand, same type). Nothing is sent — the admin
+  // reviews, picks shops and clicks Post as usual. Also what makes
+  // "Continue" usable after a reload, since that needs the composer to
+  // match the batch.
+  const repostFromBatch = async (h) => {
+    if (pushing) return;
+    const detail = await loadBatchDetail(h.batch_id);
+    const p = detail?.post;
+    if (!p) {
+      showToast("This batch has no stored post to reload (it predates post storage).", true);
+      return;
+    }
+
+    setBrandFilter(h.brand);
+    setTopicType(h.topic_type);
+    setSummary(p.summary || "");
+    setMediaUrl(p.mediaUrl || "");
+    setUploadMeta(null);
+    setUploadError(null);
+
+    if (h.topic_type === "OFFER") {
+      setOfferTitle(p.title || "");
+      setOfferStartDate(p.startDate || "");
+      setOfferEndDate(p.endDate || "");
+      setOfferCoupon(p.couponCode || "");
+      setOfferTerms(p.termsConditions || "");
+      if (p.useShopWebsite) {
+        setOfferRedeemMode("shop");
+        if (p.utmSuffix) setOfferRedeemUtm(p.utmSuffix);
+        setOfferRedeemUrl("");
+      } else {
+        setOfferRedeemMode("same");
+        setOfferRedeemUrl(p.redeemUrl || "");
+      }
+    } else {
+      setCtaAction(p.cta?.actionType || "");
+      if (p.cta?.useShopWebsite) {
+        setCtaUrlMode("shop");
+        if (p.cta.utmSuffix) setCtaUtm(p.cta.utmSuffix);
+        setCtaUrl("");
+      } else {
+        setCtaUrlMode("same");
+        setCtaUrl(p.cta?.url || "");
+      }
+    }
+
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    const today = new Date().toISOString().slice(0, 10);
+    const expiredNote = h.topic_type === "OFFER" && p.endDate && p.endDate < today
+      ? " The offer dates are in the past — update them before posting."
+      : "";
+    const inferredNote = detail.recovered === "inferred"
+      ? " Link settings were worked out from the posts as sent; check them."
+      : "";
+    showToast(`Loaded "${(p.summary || "").slice(0, 40)}${(p.summary || "").length > 40 ? "…" : ""}" into the composer. Review it, pick shops, then Post.${expiredNote}${inferredNote}`);
   };
 
   // Verify a batch: for each SUCCESS/REJECTED row in the batch, check
@@ -1448,7 +1539,12 @@ export default function GbpPostsPage() {
                       </div>
                     )}
                   </div>
-                  <div className="col-span-5 truncate" style={{ color: "#aaa" }}>
+                  <div
+                    className={`col-span-5 cursor-pointer ${expandedBatchId === h.batch_id ? "" : "truncate"}`}
+                    style={{ color: expandedBatchId === h.batch_id ? "#e8e8e8" : "#aaa" }}
+                    onClick={() => toggleBatchDetail(h)}
+                    title={expandedBatchId === h.batch_id ? "Click to collapse" : "Click to show the full post"}
+                  >
                     {h.summary}
                     {(h.auto_deleted || 0) > 0 && (
                       <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#1e2a30", border: "1px solid #2a3a44", color: "#93c5fd" }}>
@@ -1478,6 +1574,22 @@ export default function GbpPostsPage() {
                     >
                       {verify?.verifying ? "Verifying…" : "Verify"}
                     </button>
+                    {canPush && (
+                      <button
+                        onClick={() => repostFromBatch(h)}
+                        disabled={pushing}
+                        className="px-2 py-1 rounded text-[10px] font-semibold flex-shrink-0"
+                        style={{
+                          background: "#1c1c1f",
+                          border: "1px solid #2a2a2e",
+                          color: "#a78bfa",
+                          opacity: pushing ? 0.5 : 1,
+                        }}
+                        title="Load this post back into the composer so you can post it again"
+                      >
+                        Repost
+                      </button>
+                    )}
                     {canPush && (
                       <button
                         onClick={() => continueBatch(h)}
@@ -1510,6 +1622,15 @@ export default function GbpPostsPage() {
                     </button>
                   </div>
                 </div>
+                {expandedBatchId === h.batch_id && (
+                  <BatchDetailPanel
+                    batch={h}
+                    detail={detailByBatch[h.batch_id]}
+                    canPush={canPush}
+                    pushing={pushing}
+                    onRepost={() => repostFromBatch(h)}
+                  />
+                )}
                 {linkResultByBatch[h.batch_id] && !linkResultByBatch[h.batch_id].running && linkResultByBatch[h.batch_id].results && (
                   <div className="mt-1 p-3 rounded text-[11px]" style={{ background: "#0d281820", border: "1px solid #2d5a2d40" }}>
                     <div style={{ color: "#aaa" }}>
@@ -1718,6 +1839,92 @@ function StatCard({ label, value, color }) {
     <div className="px-3 py-2 rounded" style={{ background: "#0f1419", border: "1px solid #1e2a30" }}>
       <div style={{ color: "#888" }}>{label}</div>
       <div className="text-base font-bold" style={{ color: color || "#e8e8e8" }}>{value}</div>
+    </div>
+  );
+}
+
+/**
+ * Expanded history row — the full post as it was composed, plus the
+ * button / link, image and offer details. `detail.post` is the
+ * composer-shape post from /api/gbp/bulk-post?batchId; `recovered`
+ * says whether it was stored verbatim ("exact") or rebuilt from the
+ * per-shop Google bodies ("inferred" — link mode is a best guess).
+ */
+function BatchDetailPanel({ batch, detail, canPush, pushing, onRepost }) {
+  const p = detail?.post;
+  const isOffer = batch.topic_type === "OFFER";
+  const linkLabel = (useShop, utm, url) => {
+    if (useShop) return `Each shop's own website${utm ? ` + ${utm}` : ""}`;
+    return url || "—";
+  };
+  const isHttp = (u) => /^https?:\/\//i.test(String(u || ""));
+
+  return (
+    <div className="mt-1 p-4 rounded text-[11px] space-y-3" style={{ background: "#0c0c0e", border: "1px solid #2a2a2e" }}>
+      {detail?.loading && <div style={{ color: "#666" }}>Loading post…</div>}
+      {detail?.error && <div style={{ color: "#f87171" }}>Couldn't load: {detail.error}</div>}
+      {detail && !detail.loading && !detail.error && !p && (
+        <div style={{ color: "#888" }}>
+          Full text: <span style={{ color: "#e8e8e8", whiteSpace: "pre-wrap" }}>{batch.summary}</span>
+          <div className="mt-2" style={{ color: "#666" }}>No further details were stored for this batch.</div>
+        </div>
+      )}
+      {p && (
+        <>
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider mb-1" style={{ color: "#888" }}>Post text</div>
+            <div style={{ color: "#e8e8e8", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{p.summary}</div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5">
+            <Detail label="Type" value={batch.topic_type} />
+            {isOffer ? (
+              <>
+                <Detail label="Offer title" value={p.title} />
+                <Detail label="Runs" value={p.startDate && p.endDate ? `${p.startDate} → ${p.endDate}` : ""} />
+                <Detail label="Coupon code" value={p.couponCode} />
+                <Detail label="Redeem link" value={linkLabel(p.useShopWebsite, p.utmSuffix, p.redeemUrl)} />
+                <Detail label="Terms" value={p.termsConditions} wide />
+              </>
+            ) : (
+              <>
+                <Detail label="Button" value={p.cta?.actionType ? (CTA_ACTIONS.find((a) => a.value === p.cta.actionType)?.label || p.cta.actionType) : "None"} />
+                {p.cta?.actionType && p.cta.actionType !== "CALL" && (
+                  <Detail label="Button link" value={linkLabel(p.cta.useShopWebsite, p.cta.utmSuffix, p.cta.url)} />
+                )}
+              </>
+            )}
+            <Detail label="Image" value={p.mediaUrl || "None"} wide />
+          </div>
+          {isHttp(p.mediaUrl) && (
+            <img src={p.mediaUrl} alt="" className="rounded" style={{ maxHeight: 120, maxWidth: "100%", border: "1px solid #2a2a2e" }} />
+          )}
+          {detail.recovered === "inferred" && (
+            <div style={{ color: "#fbbf24" }}>
+              This batch predates post storage, so the details above were rebuilt from the posts as sent to Google. Text, image and offer fields are exact; the link setting (one URL vs. each shop's website) is a best guess.
+            </div>
+          )}
+          {canPush && (
+            <button
+              onClick={onRepost}
+              disabled={pushing}
+              className="px-3 py-1.5 rounded text-[11px] font-semibold text-white"
+              style={{ background: pushing ? "#333" : "#7c3aed", opacity: pushing ? 0.5 : 1 }}
+            >
+              Load into composer to repost
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function Detail({ label, value, wide }) {
+  if (value == null || value === "") return null;
+  return (
+    <div className={wide ? "sm:col-span-2" : ""}>
+      <span style={{ color: "#888" }}>{label}: </span>
+      <span style={{ color: "#ddd", overflowWrap: "anywhere" }}>{value}</span>
     </div>
   );
 }
