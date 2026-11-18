@@ -425,8 +425,15 @@ export default function GbpPostsPage() {
       ? overrideShopIds
       : selectedShops.map((s) => s.shop_id);
     const chunks = chunkArray(shopIdList, BATCH_SIZE);
-    const totalBatches = chunks.length;
+    // `let`: the server can hand back shops it ran out of time for, and
+    // those get queued as an extra chunk.
+    let totalBatches = chunks.length;
     const totalEligible = shopIdList.length;
+    // Set when a call came back without a readable JSON body (typically a
+    // Vercel 504/5xx page). The server may still have posted to some or
+    // all of that chunk, so the run reconciles against the batch's audit
+    // rows before reporting.
+    let transportFailure = false;
 
     let totalSucceeded = 0;
     let totalFailed = 0;
@@ -482,13 +489,31 @@ export default function GbpPostsPage() {
             ...(resumeBatchId ? { skipAlreadyPosted: true } : {}),
           }),
         });
-        const data = await res.json();
+        // Read as text first: a Vercel timeout or gateway error answers
+        // with plain text / HTML, and `res.json()` would throw a bare
+        // "JSON.parse: unexpected character" that tells the admin nothing.
+        const raw = await res.text();
+        let data = null;
+        try { data = JSON.parse(raw); } catch { data = null; }
+        if (!data || typeof data !== "object") {
+          const snippet = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 100);
+          throw Object.assign(
+            new Error(`Server didn't return a readable answer (HTTP ${res.status}${snippet ? `: ${snippet}` : ""})`),
+            { transport: true }
+          );
+        }
         if (res.ok) {
           totalSucceeded += data.succeeded || 0;
           totalFailed += data.failed || 0;
           totalRejected += data.rejected || 0;
           totalSkipped += data.skipped || 0;
           totalAlreadyPosted += data.alreadyPosted || 0;
+          // Time budget ran out server-side: these shops were never
+          // attempted. Queue them as the very next chunk.
+          if (Array.isArray(data.remainingShopIds) && data.remainingShopIds.length > 0) {
+            chunks.splice(i + 1, 0, data.remainingShopIds);
+            totalBatches = chunks.length;
+          }
           // Walk the full per-shop results array so nothing gets
           // silently dropped — we specifically capture FAILED and
           // REJECTED with their shop_id + error so the retry list
@@ -513,10 +538,50 @@ export default function GbpPostsPage() {
           }
         }
       } catch (e) {
+        if (e.transport) transportFailure = true;
         totalFailed += chunks[i].length;
         for (const sid of chunks[i]) {
-          failures.push({ shopId: sid, state: "FAILED", error: e.message });
+          failures.push({ shopId: sid, state: "FAILED", error: e.message, transport: !!e.transport });
         }
+      }
+    }
+
+    // A chunk whose response we couldn't read is not the same as a chunk
+    // that failed: the server records every shop before and after its
+    // Google call, so the batch's audit rows say what really happened.
+    // Re-grade those shops from the record rather than reporting them
+    // all as failed.
+    let unconfirmed = 0;
+    if (transportFailure) {
+      try {
+        const res = await fetch(`/api/gbp/bulk-post?batchId=${encodeURIComponent(batchId)}`);
+        const data = await res.json();
+        const recorded = new Map((data.rows || []).map((r) => [r.shopId, r]));
+        for (let k = failures.length - 1; k >= 0; k--) {
+          const f = failures[k];
+          if (!f.transport) continue;
+          const row = recorded.get(f.shopId);
+          if (row?.state === "SUCCESS") {
+            failures.splice(k, 1);
+            totalFailed--;
+            totalSucceeded++;
+          } else if (row?.state === "REJECTED") {
+            failures[k] = { shopId: f.shopId, state: "REJECTED", error: "Google's automated review rejected the post content" };
+            totalFailed--;
+            totalRejected++;
+          } else if (row?.state === "FAILED") {
+            failures[k] = { shopId: f.shopId, state: "FAILED", error: row.error || "Unknown error" };
+          } else if (row?.state === "PENDING") {
+            unconfirmed++;
+            failures[k] = { shopId: f.shopId, state: "FAILED", error: "Unconfirmed — the server was cut off mid-call. Use Verify on this batch before retrying." };
+          } else {
+            failures[k] = { shopId: f.shopId, state: "FAILED", error: `Never reached — ${f.error}` };
+          }
+        }
+        // Keep this cached so the expanded history row shows the same record.
+        setDetailByBatch((d) => ({ ...d, [batchId]: { post: data.post || null, recovered: data.recovered, rows: data.rows || [] } }));
+      } catch {
+        // Leave the transport failures as reported; Verify still works.
       }
     }
 
@@ -531,7 +596,7 @@ export default function GbpPostsPage() {
     showToast(
       cancelRef.current
         ? `Cancelled — ${totalSucceeded}/${totalEligible} posted before stop`
-        : `Posted to ${totalSucceeded}/${totalEligible} shops${totalFailed > 0 ? ` (${totalFailed} failed)` : ""}${totalRejected > 0 ? ` (${totalRejected} rejected by Google)` : ""}${totalAlreadyPosted > 0 ? ` (${totalAlreadyPosted} already had it, left alone)` : ""}`,
+        : `Posted to ${totalSucceeded}/${totalEligible} shops${totalFailed > 0 ? ` (${totalFailed} failed)` : ""}${totalRejected > 0 ? ` (${totalRejected} rejected by Google)` : ""}${totalAlreadyPosted > 0 ? ` (${totalAlreadyPosted} already had it, left alone)` : ""}${unconfirmed > 0 ? ` (${unconfirmed} unconfirmed — run Verify)` : ""}`,
       totalFailed > 0
     );
 
@@ -1915,6 +1980,91 @@ function BatchDetailPanel({ batch, detail, canPush, pushing, onRepost }) {
           )}
         </>
       )}
+      {detail && !detail.loading && !detail.error && Array.isArray(detail.rows) && detail.rows.length > 0 && (
+        <ShopOutcomes batchId={batch.batch_id} rows={detail.rows} />
+      )}
+    </div>
+  );
+}
+
+// What the server recorded for each shop in a batch. This is the record
+// of truth: a row is written before the Google call and resolved after,
+// so it reflects what happened even when the browser lost the response.
+const OUTCOME_GROUPS = [
+  { state: "SUCCESS", label: "Posted", color: "#34d399", open: true },
+  { state: "REJECTED", label: "Rejected by Google", color: "#fb923c" },
+  { state: "FAILED", label: "Failed", color: "#f87171" },
+  { state: "PENDING", label: "Unconfirmed (server cut off mid-call — run Verify)", color: "#fbbf24" },
+  { state: "AUTO_DELETED", label: "Posted, later removed by the offer-expiry cleanup", color: "#888" },
+];
+
+function ShopOutcomes({ batchId, rows }) {
+  const byState = new Map();
+  for (const r of rows) {
+    if (!byState.has(r.state)) byState.set(r.state, []);
+    byState.get(r.state).push(r);
+  }
+  const place = (r) => [r.streetAddress, [r.city, r.stateCode].filter(Boolean).join(", ")].filter(Boolean).join(" · ");
+
+  const downloadCsv = () => {
+    const esc = (v) => {
+      const s = v == null ? "" : String(v);
+      const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+      return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+    };
+    const header = ["Shop ID", "Street", "City", "State", "Outcome", "Google status", "Error", "Recorded at"];
+    const lines = [header.join(",")];
+    for (const g of OUTCOME_GROUPS) {
+      for (const r of byState.get(g.state) || []) {
+        lines.push([r.shopId, r.streetAddress, r.city, r.stateCode, g.label.split(" (")[0], r.gbpPostState, r.error, r.pushedAt].map(esc).join(","));
+      }
+    }
+    const blob = new Blob(["﻿" + lines.join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `gbp-post-${batchId}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  return (
+    <div className="pt-3 space-y-2" style={{ borderTop: "1px solid #2a2a2e" }}>
+      <div className="flex justify-between items-center gap-3">
+        <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: "#888" }}>
+          Shops in this batch ({rows.length})
+        </div>
+        <button
+          onClick={downloadCsv}
+          className="px-2 py-1 rounded text-[10px] font-semibold"
+          style={{ background: "#1c1c1f", border: "1px solid #2a2a2e", color: "#93c5fd" }}
+          title="Download every shop in this batch with its recorded outcome"
+        >
+          Download CSV
+        </button>
+      </div>
+      {OUTCOME_GROUPS.map((g) => {
+        const list = byState.get(g.state) || [];
+        if (list.length === 0) return null;
+        return (
+          <details key={g.state} open={g.open && list.length <= 60}>
+            <summary className="cursor-pointer" style={{ color: g.color }}>
+              {g.label} — {list.length}
+            </summary>
+            <div className="mt-1 max-h-64 overflow-y-auto space-y-0.5">
+              {list.map((r) => (
+                <div key={r.shopId} className="grid grid-cols-12 gap-2 text-[10px]" style={{ color: "#aaa" }}>
+                  <div className="col-span-2 font-mono" style={{ color: "#ddd" }}>{r.shopId}</div>
+                  <div className={r.error ? "col-span-5 truncate" : "col-span-10 truncate"} title={place(r)}>{place(r) || "—"}</div>
+                  {r.error && <div className="col-span-5 truncate" title={r.error} style={{ color: `${g.color}99` }}>{r.error}</div>}
+                </div>
+              ))}
+            </div>
+          </details>
+        );
+      })}
     </div>
   );
 }
