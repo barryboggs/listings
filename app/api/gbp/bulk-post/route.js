@@ -28,6 +28,11 @@ export const maxDuration = 90;
 // project-level 300 QPM (~200ms floor). We use 250ms for headroom.
 const POST_THROTTLE_MS = 250;
 
+// Stop starting new shops once a call has run this long and hand the
+// rest back to the client (`remainingShopIds`). Leaves ~30s of the 90s
+// ceiling for the in-flight Google call plus the DB writes and response.
+const TIME_BUDGET_MS = 60_000;
+
 /**
  * POST /api/gbp/bulk-post
  *
@@ -168,9 +173,21 @@ export async function POST(request) {
   let failed = 0;
   let rejected = 0;
   let skipped = 0;
+  // Shops this call didn't get to because the time budget ran out. The
+  // client re-queues them as its next chunk. Returning early with a
+  // proper JSON body beats letting Vercel kill the function at
+  // maxDuration — that comes back as a plain-text 504 the browser can't
+  // parse, and the client then has no idea which shops were reached.
+  const remainingShopIds = [];
+  const startedAt = Date.now();
 
   for (let i = 0; i < targetShops.length; i++) {
     const shop = targetShops[i];
+
+    if (Date.now() - startedAt > TIME_BUDGET_MS) {
+      for (const s of targetShops.slice(i)) remainingShopIds.push(s.shop_id);
+      break;
+    }
 
     // Skip cleanly if this shop lacks a GBP mapping — reported as
     // SKIPPED (distinct from FAILED) so the UI can tell the admin
@@ -297,22 +314,25 @@ export async function POST(request) {
   logActivity({
     user: user.name,
     action: `Bulk GBP post (${topicType})`,
-    location: `${brand} — ${targetShops.length} shops`,
+    location: `${brand} — ${targetShops.length - remainingShopIds.length} shops`,
     brand,
-    details: `succeeded:${succeeded} failed:${failed} rejected:${rejected} skipped:${skipped} · batch:${batchId}`,
+    details: `succeeded:${succeeded} failed:${failed} rejected:${rejected} skipped:${skipped}${remainingShopIds.length > 0 ? ` deferred:${remainingShopIds.length}` : ""} · batch:${batchId}`,
   }).catch((e) => console.error("logActivity (gbp-bulk-post):", e.message));
 
   return NextResponse.json({
     batchId,
     brand,
     topicType,
-    total: targetShops.length,
+    total: targetShops.length - remainingShopIds.length,
     succeeded,
     failed,
     rejected,
     skipped,
     alreadyPosted,
     results,
+    // Non-empty when the time budget cut the call short. These shops were
+    // NOT attempted (no audit row); the client sends them in its next call.
+    remainingShopIds: remainingShopIds.length > 0 ? remainingShopIds : undefined,
     errors: errors.length > 0 ? errors : undefined,
   });
 }
@@ -471,12 +491,32 @@ export async function GET(request) {
     const rows = await getGbpPostPushes({ batchId, limit: 5000 });
     const topicType = rows[0]?.topic_type || null;
     const { post, recovered } = recoverComposerPost(rows, topicType);
+    // Join the shop's address so the per-shop outcome list in the UI
+    // reads as a place, not an id. lm_shop_numbers has no business name.
+    const brand = rows[0]?.brand || null;
+    const shopById = new Map();
+    if (brand) {
+      const allShops = await getShopNumbers();
+      for (const s of allShops) if (s.brand === brand) shopById.set(s.shop_id, s);
+    }
     return NextResponse.json({
       batchId,
       topicType,
       post,
       recovered,
-      rows: rows.map((r) => ({ shopId: r.shop_id, state: r.state })),
+      rows: rows.map((r) => {
+        const s = shopById.get(r.shop_id);
+        return {
+          shopId: r.shop_id,
+          state: r.state,
+          gbpPostState: r.gbp_post_state || null,
+          error: r.error || null,
+          pushedAt: r.pushed_at || null,
+          streetAddress: s?.street_address || null,
+          city: s?.city || null,
+          stateCode: s?.state || null,
+        };
+      }),
     });
   }
 
