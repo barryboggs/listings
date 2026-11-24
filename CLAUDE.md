@@ -109,6 +109,18 @@ Because PATCH only touches the fields in `update_mask`, `existingLocations` from
 
 Per-item results: `[{ locationId, state: "UPDATED" | "FAILED" | "SKIPPED", error? }]`.
 
+### GBP holiday hours import (direct to Google, no Semrush)
+
+[/dashboard/gbp-holiday-import](app/dashboard/gbp-holiday-import/page.js) is the Semrush holiday import's twin, writing straight to Google Business Profile. Same CSV (`Franchise ID, Holiday, Holiday Open, Holiday Close [, Holiday 2, ...]`), parsed by the shared [lib/holiday-csv.js](lib/holiday-csv.js) (the Semrush route imports the same helpers). Extra: Open/Close of `REMOVE` deletes that date from the profile — only honoured when the parser is called with `allowRemove`, which only the GBP route does.
+
+- `POST /api/gbp/holiday-import` `{ csvData }` → preview. Matches Franchise IDs to `lm_shop_numbers` rows with a `gbp_location_id`; reports `unmatched` (unknown shop) separately from `noGbp` (known shop, no mapping). Admin/manager.
+- `POST /api/gbp/holiday-push` `{ batchId, updates: [{ shopId, holidayHours }] }` ≤50 per call. Per shop: `getGbpSpecialHours` → `mergeSpecialHours` ([lib/gbp-hours.js](lib/gbp-hours.js), pure) → `updateGbpSpecialHours` (`PATCH locations/{id}?updateMask=specialHours`). **Only the CSV's dates change**; every other period on the profile is written back as-is, except periods that already ended, which are dropped (Google hides them anyway and may reject writes containing them). Unchanged lists are not written (`UNCHANGED`). 60s time budget → `remainingShopIds`, same as bulk-post. Audit rows in `lm_gbp_hours_pushes` carry the full `before`/`after` lists so an import can be reversed by hand.
+- `GET /api/gbp/holiday-push` → recent batches; `?batchId=` → per-shop rows (the page's history list + CSV download).
+
+Google's `SpecialHourPeriod` shape: `{ startDate: {year,month,day}, endDate, closed?: true | openTime: {hours,minutes?}, closeTime }`, one period per open range, `closeTime { hours: 24 }` for midnight. A multi-day period covering a CSV date is dropped whole (Google can't carve a day out of it).
+
+Semrush is not touched by this import. A later Semrush push of `special_hours` for the same shop would overwrite Google's list, so prefer one system per brand for holiday hours.
+
 ### Bulk listing-photo push
 
 [/dashboard/listings-photos](app/dashboard/listings-photos/page.js) pushes one image to every shop in a brand via Semrush's rich-API image endpoint. Same `Authorization: Apikey` auth. Reaches every directory Semrush distributes to (Google, Bing, Yelp, Apple Maps, Facebook, etc.).
