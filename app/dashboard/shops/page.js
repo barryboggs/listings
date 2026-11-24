@@ -101,6 +101,32 @@ export default function ShopsPage() {
     setAssignBusy(null);
   };
 
+  // The auto-matcher on the server reads six fields per location. Sending
+  // the full location objects (~2 KB each, thousands of shops) blows past
+  // Vercel's 4.5 MB request-body limit, which answers with an HTML error
+  // page and shows up in the browser as "JSON.parse: unexpected character".
+  const trimForMatching = (locs) =>
+    (locs || []).map((l) => ({
+      id: l.id,
+      website: l.website,
+      websiteRaw: l.websiteRaw,
+      phone: l.phone,
+      address: l.address,
+      city: l.city,
+    }));
+
+  // Read a response as text first so a non-JSON body (Vercel 413/504 page)
+  // becomes a readable error instead of a bare JSON.parse failure.
+  const readJson = async (res) => {
+    const raw = await res.text();
+    try {
+      return JSON.parse(raw);
+    } catch {
+      const snippet = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 100);
+      throw new Error(`Server didn't return a readable answer (HTTP ${res.status}${snippet ? `: ${snippet}` : ""})`);
+    }
+  };
+
   const handleFileSelect = async (file) => {
     if (!file) return;
     if (!file.name.endsWith(".csv")) {
@@ -124,11 +150,11 @@ export default function ShopsPage() {
         body: JSON.stringify({
           action: "import",
           csvData,
-          locations: locData.locations || [],
+          locations: trimForMatching(locData.locations),
         }),
       });
 
-      const result = await res.json();
+      const result = await readJson(res);
       if (res.ok) {
         setImportResult(result);
         showToast(`Imported ${result.imported} shop numbers, matched ${result.matched} to Semrush locations`);
@@ -161,17 +187,19 @@ export default function ShopsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "match",
-          locations: locData.locations || [],
+          locations: trimForMatching(locData.locations),
         }),
       });
 
-      const result = await res.json();
+      const result = await readJson(res);
       if (res.ok) {
         showToast(`Re-matched: ${result.matched} matched, ${result.unmatched} unmatched`);
         fetchShops();
+      } else {
+        showToast(result.error || "Re-match failed", true);
       }
-    } catch {
-      showToast("Re-match failed", true);
+    } catch (error) {
+      showToast("Re-match failed — " + error.message, true);
     }
     setMatching(false);
   };
