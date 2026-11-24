@@ -1,59 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifyToken } from "@/lib/auth";
-
-/**
- * Parse time strings like "9:00:00 AM", "5:00:00 PM" into "HH:mm" (24h)
- */
-function parseTime(timeStr) {
-  if (!timeStr) return null;
-  const str = timeStr.trim();
-  if (!str || str.toLowerCase() === "close" || str.toLowerCase() === "closed") return null;
-
-  const match = str.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/i);
-  if (match) {
-    let hours = parseInt(match[1]);
-    const minutes = match[2];
-    const ampm = match[3].toUpperCase();
-    if (ampm === "PM" && hours !== 12) hours += 12;
-    if (ampm === "AM" && hours === 12) hours = 0;
-    return `${String(hours).padStart(2, "0")}:${minutes}`;
-  }
-
-  const match24 = str.match(/^(\d{1,2}):(\d{2})$/);
-  if (match24) return `${String(parseInt(match24[1])).padStart(2, "0")}:${match24[2]}`;
-
-  return null;
-}
-
-function parseDate(dateStr) {
-  if (!dateStr) return null;
-  const str = dateStr.trim();
-  if (!str) return null;
-  const match = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (match) return `${match[3]}-${String(parseInt(match[1])).padStart(2, "0")}-${String(parseInt(match[2])).padStart(2, "0")}`;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
-  return null;
-}
-
-function isClosed(openVal, closeVal) {
-  const o = (openVal || "").trim().toLowerCase();
-  const c = (closeVal || "").trim().toLowerCase();
-  return o === "close" || o === "closed" || c === "close" || c === "closed" || (!o && !c);
-}
-
-function parseCSVLine(line) {
-  const result = [];
-  let current = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (char === '"') { inQuotes = !inQuotes; }
-    else if (char === "," && !inQuotes) { result.push(current); current = ""; }
-    else { current += char; }
-  }
-  result.push(current);
-  return result;
-}
+// Shared with the GBP import (app/api/gbp/holiday-import).
+import { parseTime, parseDate, isClosed, parseCSVLine } from "@/lib/holiday-csv";
 
 /**
  * POST - Parse holiday hours CSV and return preview with matched location data.
